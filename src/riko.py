@@ -152,21 +152,21 @@ class AbstractModel:
         pass
 
     @classmethod
-    def select(cls, _tx=None, _columns=None):
-        return SelectQuery(cls, _columns).set_session(_tx)
+    def select(cls, _tx=None, return_columns=None):
+        return SelectQuery(cls, return_columns).set_session(_tx)
 
     @classmethod
-    def get(cls, _tx=None, _columns=None, _limit=None, _offset=None,
+    def get(cls, _tx=None, return_columns=None, _limit=None, _offset=None,
             _order=None, _where_raw=None, _args=None, **_where_terms):
-        return (SelectQuery(cls, columns=_columns, limit=_limit, offset=_offset, order_by=_order)
+        return (SelectQuery(cls, columns=return_columns, limit=_limit, offset=_offset, order_by=_order)
                 .set_session(_tx)
                 .where_raw(_where_raw)
                 .where(**_where_terms)
                 .get(_args, parse_model=True))
 
     @classmethod
-    def get_one(cls, _tx=None, _columns=None, _where_raw=None, _args=None, **_where_terms):
-        return cls.get(_tx=_tx, _columns=_columns, _limit=1, _offset=None,
+    def get_one(cls, _tx=None, return_columns=None, _where_raw=None, _args=None, **_where_terms):
+        return cls.get(_tx=_tx, _columns=return_columns, _limit=1, _offset=None,
                        _order=None, _where_raw=_where_raw, _args=_args, **_where_terms)
 
 
@@ -537,6 +537,11 @@ class SelectQuery(PaginationOrderQuery):
         self._distinct = False
         self._group_by = list()
         self._having = list()
+        self._alias = None
+
+    def alias(self, alias):
+        self._alias = alias
+        return self
 
     def distinct(self):
         self._distinct = True
@@ -565,6 +570,9 @@ class SelectQuery(PaginationOrderQuery):
                 self._args["__RIKO_HAVING_" + k] = v
         return self
 
+    def _construct_alias_table_clause(self):
+        return self._clz_meta.__name__ if self._alias is None else (self._clz_meta.__name__ + " AS " + str(self._alias))
+
     def _construct_distinct_clause(self):
         return "DISTINCT" if self._distinct else ""
 
@@ -588,7 +596,7 @@ class SelectQuery(PaginationOrderQuery):
         r_dict = {
             SqlQuery._KW_DISTINCT: self._construct_distinct_clause(),
             SqlQuery._KW_FIELDS: self._construct_select_fields_clause(),
-            SqlQuery._KW_TABLE: self._clz_meta.__name__,
+            SqlQuery._KW_TABLE: self._construct_alias_table_clause(),
             SqlQuery._KW_WHERE: self._construct_where_clause(),
             SqlQuery._KW_GROUP_BY: self._construct_group_by_clause(),
             SqlQuery._KW_HAVING: self._construct_having_clause(),

@@ -23,10 +23,11 @@ if __name__ == '__main__':
     RikoConfig.update_default(database="blog")
     pass
     refind_ba = (BlogArticle
-                 .select(_columns=('title', ))
+                 .select(return_columns=('title', ))
+                 .alias("t")
                  .distinct()
                  .where(author_uid=12)
-                 .where_raw("aid <= %(aid_limit)s")
+                 .where_raw("t.aid <= %(aid_limit)s")
                  .get({'aid_limit': 3}))
     pass
     ba = BlogArticle.create(author_uid=12, title="Koito yuu", content="Koito yuu love Nanami Touko.")
@@ -45,7 +46,7 @@ if __name__ == '__main__':
                  .order_by("age")
                  .get())
     pass
-    user_cols = BlogUser.get(_columns=("username", "age"), age=23)
+    user_cols = BlogUser.get(return_columns=("username", "age"), age=23)
     pass
     user1 = BlogUser.create(username="Rinka", age=25)
     uid = user1.insert()
