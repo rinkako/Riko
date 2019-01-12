@@ -3,6 +3,7 @@ Project Riko
 
 Riko is a simple and light ORM for MySQL.
 """
+import contextlib
 from abc import ABCMeta, abstractmethod
 import pymysql
 
@@ -34,27 +35,31 @@ class AbstractModel:
     DO NOT inherit this, inherit `DictModel` or `ObjectModel` instead.
     """
     __metaclass__ = ABCMeta
+    _abstract_inner_var = {"db_config_", "db_session_"}
 
     def __init__(self, _db_config=None):
         """
         Create a Riko model object.
         :param _db_config: database to mapping
         """
-        self.db_config_, self.db_session_ = AbstractModel.__prepare_session(_db_config)
+        self.db_config_ = RikoConfig.db_config if _db_config is None else _db_config
+        self.db_session_ = DBI.get_connection(self.db_config_)
 
     @classmethod
     def deserialize(cls, db_conf, **terms):
-        des_obj = cls(db_conf)
+        try:
+            des_obj = cls(db_conf)
+        except:
+            des_obj = cls()
         if terms is not None:
             for (k, v) in terms.items():
                 des_obj._set_value(k, v)
         return des_obj
 
-    @staticmethod
-    def __prepare_session(db_config=None):
-        db_config_ = RikoConfig.db_config if db_config is None else db_config
-        db_session_ = DBI.get_connection(db_config_)
-        return db_config_, db_session_
+    def columns(self):
+        _columns = self._get_columns()
+        for k in _columns:
+            yield k
 
     @abstractmethod
     def _get_ak(self): pass
@@ -72,24 +77,28 @@ class AbstractModel:
     def _get_columns(self): pass
 
     @abstractmethod
-    def _columns(self): pass
-
-    @abstractmethod
     def _get_value(self, column): pass
 
     @abstractmethod
     def _set_value(self, column, value): pass
 
     @classmethod
-    def create(cls, _tx=None, **kwargs):
-        pass
+    def create(cls, _db_config=None, **kwargs):
+        try:
+            created = cls(_db_config)
+        except:
+            created = cls()
+        if kwargs is not None:
+            for (k, v) in kwargs.items():
+                created._set_value(k, v)
+        return created
 
     def insert(self):
         insert_dict = dict()
         if type(self) is dict:
             insert_dict = self
         else:
-            for k in self._columns():
+            for k in self.columns():
                 actual_value = self._get_value(k)
                 if actual_value is not None:
                     insert_dict[k] = actual_value
@@ -123,7 +132,7 @@ class AbstractModel:
                 update_pk_dict[k] = actual_value
         update_field_dict = dict()
         # TODO primary key may be update but cannot handle now
-        for k in self._columns():
+        for k in self.columns():
             update_field_dict[k] = self._get_value(k)
         return (UpdateQuery(self.__class__)
                 .set_session(self.db_session_)
@@ -153,7 +162,7 @@ class AbstractModel:
                 .set_session(_tx)
                 .where_raw(_where_raw)
                 .where(**_where_terms)
-                .get(_args))
+                .get(_args, parse_model=True))
 
     @classmethod
     def get_one(cls, _tx=None, _columns=None, _where_raw=None, _args=None, **_where_terms):
@@ -222,7 +231,7 @@ FROM {{__RIKO_TABLE__}}
             self._dbi = dbi
         return self
 
-    def get(self, args=None):
+    def get(self, args=None, parse_model=False):
         self._prepare_sql()
         if args is not None:
             self._args.update(args)
@@ -231,7 +240,8 @@ FROM {{__RIKO_TABLE__}}
         finally:
             if self._temporary_dbi:
                 self._dbi.close()
-        return [self._clz_meta.deserialize(self._dbi.get_config(), **kvt) for kvt in raw_result]
+        return [self._clz_meta.deserialize(self._dbi.get_config(), **kvt) for kvt in raw_result] \
+            if parse_model else raw_result
 
     def only(self, args=None):
         self._prepare_sql()
@@ -530,6 +540,7 @@ class SelectQuery(PaginationOrderQuery):
 
     def distinct(self):
         self._distinct = True
+        return self
 
     def group_by(self, group_terms):
         if group_terms is not None:
@@ -639,11 +650,6 @@ class DictModel(AbstractModel, dict):
     def _get_columns(self):
         return self.pk + self.fields
 
-    def _columns(self):
-        _columns = self._get_columns()
-        for k in _columns:
-            yield k
-
     def _get_value(self, column):
         return self[column] if column in self else None
 
@@ -655,32 +661,58 @@ class DictModel(AbstractModel, dict):
 
 
 class ObjectModel(AbstractModel):
+    """
+    Basic object model in object mapping structure, inherit this and set `pk` and `fields`.
+    """
+
+    # Auto increment key
+    ak = None
+
+    # Primary key list
+    pk = []
+
     def __init__(self, _db_config=None):
         super().__init__(_db_config)
+        self._model_fields = None
+        self._model_columns = None
 
     def _get_ak(self):
-        pass
+        return self.ak
 
     def _set_ak(self, value):
-        pass
+        if hasattr(self, self.ak):
+            setattr(self, self.ak, value)
+        else:
+            raise Exception("Miss match auto increment column in Model: " + self.ak)
 
     def _get_pk(self):
-        pass
+        return self.pk
 
     def _get_fields(self):
-        pass
+        if self._model_fields is None:
+            self._model_fields = list(vars(self).keys())
+            for _ik in self._abstract_inner_var:
+                self._model_fields.remove(_ik)
+            self._model_fields.remove("_model_fields")
+            self._model_fields.remove("_model_columns")
+            for pkt in self.pk:
+                self._model_fields.remove(pkt)
+        return self._model_fields
 
     def _get_columns(self):
-        pass
-
-    def _columns(self):
-        pass
+        return self._get_fields() + self.pk
 
     def _get_value(self, column):
-        pass
+        if hasattr(self, column):
+            return getattr(self, column)
+        else:
+            return None
 
     def _set_value(self, column, value):
-        pass
+        if hasattr(self, column):
+            setattr(self, column, value)
+        else:
+            raise Exception("Miss match column in Model: " + column)
 
 
 class DBI:
@@ -724,7 +756,8 @@ class DBI:
         else:
             return
 
-    def with_transaction(self):
+    @contextlib.contextmanager
+    def transaction(self):
         _auto_commit = self._conn.get_autocommit()
         self._conn.autocommit(False)
         self._conn.begin()
