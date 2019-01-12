@@ -20,6 +20,14 @@ class RikoConfig:
         'autocommit': True
     }
 
+    @staticmethod
+    def set_default(db_config):
+        RikoConfig.db_config = db_config
+
+    @staticmethod
+    def update_default(**db_config):
+        RikoConfig.db_config.update(db_config)
+
 
 class AbstractModel:
     """
@@ -27,32 +35,101 @@ class AbstractModel:
     """
     __metaclass__ = ABCMeta
 
-    def __init__(self, db_config=None):
+    def __init__(self, _db_config=None):
         """
         Create a Riko model object.
-        :param db_config:
+        :param _db_config: database to mapping
         """
-        self.db_config_ = RikoConfig.db_config if db_config is None else db_config
-        self.db_session_ = DBI.get_connection(self.db_config_)
+        self.db_config_, self.db_session_ = AbstractModel.__prepare_session(_db_config)
+
+    @classmethod
+    def deserialize(cls, db_conf, **terms):
+        des_obj = cls(db_conf)
+        if terms is not None:
+            for (k, v) in terms.items():
+                des_obj._set_value(k, v)
+        return des_obj
+
+    @staticmethod
+    def __prepare_session(db_config=None):
+        db_config_ = RikoConfig.db_config if db_config is None else db_config
+        db_session_ = DBI.get_connection(db_config_)
+        return db_config_, db_session_
 
     @abstractmethod
-    def get_pk(self): pass
+    def _get_ak(self): pass
 
     @abstractmethod
-    def get_fields(self): pass
+    def _set_ak(self, value): pass
+
+    @abstractmethod
+    def _get_pk(self): pass
+
+    @abstractmethod
+    def _get_fields(self): pass
+
+    @abstractmethod
+    def _get_columns(self): pass
+
+    @abstractmethod
+    def _columns(self): pass
+
+    @abstractmethod
+    def _get_value(self, column): pass
+
+    @abstractmethod
+    def _set_value(self, column, value): pass
 
     @classmethod
     def create(cls, _tx=None, **kwargs):
         pass
 
     def insert(self):
-        pass
+        insert_dict = dict()
+        if type(self) is dict:
+            insert_dict = self
+        else:
+            for k in self._columns():
+                actual_value = self._get_value(k)
+                if actual_value is not None:
+                    insert_dict[k] = actual_value
+        auto_key = self._get_ak()
+        re_affect_id = (InsertQuery(self.__class__)
+                        .set_session(self.db_session_)
+                        .values(**insert_dict)
+                        .go(return_last_id=True if auto_key is not None else False))
+        if auto_key is not None:
+            self._set_ak(re_affect_id)
+        return re_affect_id
 
     def delete(self):
-        pass
+        delete_dict = dict()
+        pks = self._get_pk()
+        for k in pks:
+            actual_value = self._get_value(k)
+            if actual_value is not None:
+                delete_dict[k] = actual_value
+        return (DeleteQuery(self.__class__)
+                .set_session(self.db_session_)
+                .where(**delete_dict)
+                .go())
 
-    def update(self):
-        pass
+    def save(self):
+        update_pk_dict = dict()
+        pks = self._get_pk()
+        for k in pks:
+            actual_value = self._get_value(k)
+            if actual_value is not None:
+                update_pk_dict[k] = actual_value
+        update_field_dict = dict()
+        # TODO primary key may be update but cannot handle now
+        for k in self._columns():
+            update_field_dict[k] = self._get_value(k)
+        return (UpdateQuery(self.__class__)
+                .set_session(self.db_session_)
+                .set(**update_field_dict)
+                .where(**update_pk_dict)
+                .go())
 
     def insert_update(self):
         pass
@@ -67,15 +144,21 @@ class AbstractModel:
 
     @classmethod
     def select(cls, _tx=None, _columns=None):
-        pass
+        return SelectQuery(cls, _columns).set_session(_tx)
 
     @classmethod
-    def get(cls, _tx=None, _columns=None, _limit=None, _offset=None, _order=None, _where_clause=None, **_where_terms):
-        pass
+    def get(cls, _tx=None, _columns=None, _limit=None, _offset=None,
+            _order=None, _where_raw=None, _args=None, **_where_terms):
+        return (SelectQuery(cls, columns=_columns, limit=_limit, offset=_offset, order_by=_order)
+                .set_session(_tx)
+                .where_raw(_where_raw)
+                .where(**_where_terms)
+                .get(_args))
 
     @classmethod
-    def get_one(cls, tx=None, _columns=None, **_where_terms):
-        pass
+    def get_one(cls, _tx=None, _columns=None, _where_raw=None, _args=None, **_where_terms):
+        return cls.get(_tx=_tx, _columns=_columns, _limit=1, _offset=None,
+                       _order=None, _where_raw=_where_raw, _args=_args, **_where_terms)
 
 
 class SqlQuery:
@@ -83,18 +166,19 @@ class SqlQuery:
 
     _KW_TABLE = "{{__RIKO_TABLE__}}"
     _KW_INSERT_REPLACE = "{{__RIKO_INSERT_REPLACE__}}"
-    _KW_IGNORE = "{{__RIKO_IGNORE__}}"
     _KW_FIELDS = "{{__RIKO_FIELDS__}}"
     _KW_VALUES = "{{__RIKO_VALUES__}}"
     _KW_ON_DUPLICATE_KEY_UPDATE = "{{__RIKO_DUPLICATE_KEY__}}"
     _KW_WHERE = "{{__RIKO_WHERE__}}"
     _KW_DISTINCT = "{{__RIKO_DISTINCT__}}"
     _KW_GROUP_BY = "{{__RIKO_GROUP_BY__}}"
-    _KW_HAVING = "{{__RIKO_RIKO_HAVING__}}"
+    _KW_HAVING = "{{__RIKO_HAVING__}}"
     _KW_ORDER_BY = "{{__RIKO_ORDER_BY__}}"
+    _KW_LIMIT = "{{__RIKO_LIMIT__}}"
+    _KW_OFFSET = "{{__RIKO_OFFSET__}}"
 
     _Insert_Template = """
-{{__RIKO_INSERT_REPLACE__}} {{__RIKO_IGNORE__}} INTO {{__RIKO_TABLE__}}({{__RIKO_FIELDS__}})
+{{__RIKO_INSERT_REPLACE__}} INTO {{__RIKO_TABLE__}}({{__RIKO_FIELDS__}})
 VALUES ({{__RIKO_VALUES__}})
 {{__RIKO_DUPLICATE_KEY__}}
 """
@@ -115,55 +199,90 @@ FROM {{__RIKO_TABLE__}}
 {{__RIKO_GROUP_BY__}}
 {{__RIKO_HAVING__}}
 {{__RIKO_ORDER_BY__}}
+{{__RIKO_LIMIT__}}
+{{__RIKO_OFFSET__}}
 """
 
-    def __init__(self):
+    def __init__(self, clazz):
+        assert clazz is not None
         self._sql = None
         self._dbi = None
-        self._clz_meta = None
+        self._clz_meta = clazz
+        self._temporary_dbi = False
         self._args = dict()
 
     def __str__(self):
         return self._sql
 
-    def binding(self, clz, dbi):
-        self._dbi = dbi
-        self._clz_meta = clz
+    def set_session(self, dbi=None):
+        if dbi is None:
+            self._dbi = DBI(RikoConfig.db_config)
+            self._temporary_dbi = True
+        else:
+            self._dbi = dbi
+        return self
 
     def get(self, args=None):
         self._prepare_sql()
-        return self._dbi.query(self._sql, args)
+        if args is not None:
+            self._args.update(args)
+        try:
+            raw_result = self._dbi.query(self._sql, self._args)
+        finally:
+            if self._temporary_dbi:
+                self._dbi.close()
+        return [self._clz_meta.deserialize(self._dbi.get_config(), **kvt) for kvt in raw_result]
 
     def only(self, args=None):
         self._prepare_sql()
-        ret = self._dbi.query(self._sql, args)
-        return ret[0] if ret and len(ret) > 0 else None
+        if args is not None:
+            self._args.update(args)
+        try:
+            ret = self._dbi.query(self._sql, self._args)
+            return ret[0] if ret and len(ret) > 0 else None
+        finally:
+            if self._temporary_dbi:
+                self._dbi.close()
 
-    def go(self, args=None):
+    def go(self, args=None, return_last_id=False):
         self._prepare_sql()
-        return self._dbi.query(self._sql, args, affected_row=True)
+        if args is not None:
+            self._args.update(args)
+        try:
+            return self._dbi.query(self._sql, self._args,
+                                   return_pattern=DBI.RETURN_AFFECTED_ROW
+                                   if return_last_id is False else DBI.RETURN_LAST_ROW_ID)
+        finally:
+            if self._temporary_dbi:
+                self._dbi.close()
 
     def cursor(self, args=None):
         self._prepare_sql()
-        return self._dbi.query(self._sql, args, fetch_result=False)
+        if args is not None:
+            self._args.update(args)
+        return self._dbi.query(self._sql, self._args, return_pattern=DBI.RETURN_NONE)
 
     def with_cursor(self, args=None):
         ptr = None
+        self._prepare_sql()
+        if args is not None:
+            self._args.update(args)
         try:
-            self._prepare_sql()
-            ptr = self._dbi.query(self._sql, args, fetch_result=False)
+            ptr = self._dbi.query(self._sql, self._args, return_pattern=DBI.RETURN_NONE)
             yield ptr
         finally:
             if ptr:
                 ptr.close()
+            if self._temporary_dbi:
+                self._dbi.close()
 
     @abstractmethod
     def _prepare_sql(self): pass
 
 
 class ConditionQuery(SqlQuery):
-    def __init__(self, where=None):
-        super().__init__()
+    def __init__(self, clazz, where=None):
+        super().__init__(clazz)
         if where is not None:
             if type(where) in (list, tuple):
                 self._where = where
@@ -196,9 +315,9 @@ class ConditionQuery(SqlQuery):
     def _prepare_sql(self): pass
 
 
-class OrderQuery(ConditionQuery):
-    def __init__(self, where=None, order_by=None):
-        super().__init__(where)
+class OrderedQuery(ConditionQuery):
+    def __init__(self, clazz, where=None, order_by=None):
+        super().__init__(clazz, where)
         if order_by is not None:
             if type(order_by) in (list, tuple):
                 self._order_by = order_by
@@ -210,18 +329,23 @@ class OrderQuery(ConditionQuery):
     def order_by(self, column_terms):
         if column_terms is not None:
             if type(column_terms) in (list, tuple):
-                self._where.extend(column_terms)
+                self._order_by.extend(column_terms)
             else:
-                self._where.append(str(column_terms))
+                self._order_by.append(str(column_terms))
         return self
+
+    def _construct_order_by_clause(self):
+        if len(self._order_by) == 0:
+            return ""
+        return "ORDER BY " + ", ".join(self._order_by)
 
     @abstractmethod
     def _prepare_sql(self): pass
 
 
-class ReversibleQuery(OrderQuery):
-    def __init__(self, where=None, order_by=None):
-        super().__init__(where, order_by)
+class ReversibleQuery(OrderedQuery):
+    def __init__(self, clazz, where=None, order_by=None):
+        super().__init__(clazz, where, order_by)
         self._warp_reverse = False
 
     def reverse(self):
@@ -233,8 +357,8 @@ class ReversibleQuery(OrderQuery):
 
 
 class PaginationOrderQuery(ReversibleQuery):
-    def __init__(self, where=None, limit=None, offset=None, order_by=None):
-        super().__init__(where, order_by)
+    def __init__(self, clazz, where=None, limit=None, offset=None, order_by=None):
+        super().__init__(clazz, where, order_by)
         self._limit = limit
         self._offset = offset
 
@@ -246,13 +370,23 @@ class PaginationOrderQuery(ReversibleQuery):
         self._offset = offset
         return self
 
+    def _construct_limit_clause(self):
+        if self._limit is None:
+            return ""
+        return "LIMIT " + str(self._limit)
+
+    def _construct_offset_clause(self):
+        if self._offset is None:
+            return ""
+        return "OFFSET " + str(self._offset)
+
     @abstractmethod
     def _prepare_sql(self): pass
 
 
 class InsertQuery(SqlQuery):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, clazz):
+        super().__init__(clazz)
         self._on_duplicate_key_update = False
         self._on_duplicate_key_ignore = False
         self._on_duplicate_key_replace = False
@@ -328,7 +462,7 @@ class InsertQuery(SqlQuery):
         return "ON DUPLICATE KEY UPDATE " + ", ".join(self._duplicate_update)
 
     def _prepare_sql(self):
-        self._sql = SqlQuery._Delete_Template
+        self._sql = SqlQuery._Insert_Template
         r_dict = {
             SqlQuery._KW_INSERT_REPLACE: self._construct_insert_operator_clause(),
             SqlQuery._KW_TABLE: self._clz_meta.__name__,
@@ -340,8 +474,8 @@ class InsertQuery(SqlQuery):
 
 
 class DeleteQuery(ConditionQuery):
-    def __init__(self, where=None):
-        super().__init__(where)
+    def __init__(self, clazz, where=None):
+        super().__init__(clazz, where)
 
     def _prepare_sql(self):
         self._sql = SqlQuery._Delete_Template
@@ -353,8 +487,8 @@ class DeleteQuery(ConditionQuery):
 
 
 class UpdateQuery(ConditionQuery):
-    def __init__(self, where=None):
-        super().__init__(where)
+    def __init__(self, clazz, where=None):
+        super().__init__(clazz, where)
         self._update_set = list()
 
     def set_raw(self, update_terms):
@@ -377,11 +511,79 @@ class UpdateQuery(ConditionQuery):
         return ", ".join(self._update_set)
 
     def _prepare_sql(self):
-        self._sql = SqlQuery._Delete_Template
+        self._sql = SqlQuery._Update_Template
         r_dict = {
             SqlQuery._KW_TABLE: self._clz_meta.__name__,
             SqlQuery._KW_WHERE: self._construct_where_clause(),
             SqlQuery._KW_FIELDS: self._construct_update_set_clause()
+        }
+        self._sql = SqlRender.render(self._sql, r_dict)
+
+
+class SelectQuery(PaginationOrderQuery):
+    def __init__(self, clazz, columns=None, where=None, limit=None, offset=None, order_by=None):
+        super().__init__(clazz, where, limit, offset, order_by)
+        self._return_columns = list() if columns is None else list(columns)
+        self._distinct = False
+        self._group_by = list()
+        self._having = list()
+
+    def distinct(self):
+        self._distinct = True
+
+    def group_by(self, group_terms):
+        if group_terms is not None:
+            if type(group_terms) in (list, tuple):
+                self._group_by.extend(group_terms)
+            else:
+                self._group_by.append(str(group_terms))
+        return self
+
+    def having_raw(self, having_terms):
+        if having_terms is not None:
+            if type(having_terms) in (list, tuple):
+                self._having.extend(having_terms)
+            else:
+                self._having.append(str(having_terms))
+        return self
+
+    def having(self, **having_terms):
+        if having_terms is not None:
+            for (k, v) in having_terms.items():
+                self._having.append(k + " = %(__RIKO_HAVING_" + k + ")s")
+                self._args["__RIKO_HAVING_" + k] = v
+        return self
+
+    def _construct_distinct_clause(self):
+        return "DISTINCT" if self._distinct else ""
+
+    def _construct_select_fields_clause(self):
+        if len(self._return_columns) == 0:
+            return "*"
+        return ",".join(self._return_columns)
+
+    def _construct_group_by_clause(self):
+        if len(self._group_by) == 0:
+            return ""
+        return "GROUP BY " + ",".join(self._group_by)
+
+    def _construct_having_clause(self):
+        if len(self._group_by) == 0 or len(self._having) == 0:
+            return ""
+        return "HAVING " + " AND ".join(self._having)
+
+    def _prepare_sql(self):
+        self._sql = SqlQuery._Select_Template
+        r_dict = {
+            SqlQuery._KW_DISTINCT: self._construct_distinct_clause(),
+            SqlQuery._KW_FIELDS: self._construct_select_fields_clause(),
+            SqlQuery._KW_TABLE: self._clz_meta.__name__,
+            SqlQuery._KW_WHERE: self._construct_where_clause(),
+            SqlQuery._KW_GROUP_BY: self._construct_group_by_clause(),
+            SqlQuery._KW_HAVING: self._construct_having_clause(),
+            SqlQuery._KW_ORDER_BY: self._construct_order_by_clause(),
+            SqlQuery._KW_LIMIT: self._construct_limit_clause(),
+            SqlQuery._KW_OFFSET: self._construct_offset_clause(),
         }
         self._sql = SqlRender.render(self._sql, r_dict)
 
@@ -396,15 +598,17 @@ class SqlRender:
         :return: rendered sql string
         """
         _render = template
-        for (k, v) in args:
+        for (k, v) in args.items():
             _render = _render.replace(k, v)
         return _render
 
 
-class DictModel(dict, AbstractModel):
+class DictModel(AbstractModel, dict):
     """
     Basic object model in dict structure, inherit this and set `pk` and `fields`.
     """
+    # Auto increment key
+    ak = None
 
     # Primary key list
     pk = []
@@ -412,25 +616,82 @@ class DictModel(dict, AbstractModel):
     # Fields list
     fields = []
 
-    def __init__(self, db_config=None):
+    def __init__(self, _db_config=None):
         """
         Create a new dict-like ORM object.
-        :param db_config: db config using for connect to db, or None to use default `RikoConfig`
+        :param _db_config: db config using for connect to db, or None to use default `RikoConfig`
         """
         dict.__init__(self)
-        AbstractModel.__init__(self, db_config)
+        AbstractModel.__init__(self, _db_config)
 
-    def get_pk(self):
+    def _get_ak(self):
+        return self.ak
+
+    def _set_ak(self, value):
+        self[self.ak] = value
+
+    def _get_pk(self):
         return self.pk
 
-    def get_fields(self):
+    def _get_fields(self):
         return self.fields
+
+    def _get_columns(self):
+        return self.pk + self.fields
+
+    def _columns(self):
+        _columns = self._get_columns()
+        for k in _columns:
+            yield k
+
+    def _get_value(self, column):
+        return self[column] if column in self else None
+
+    def _set_value(self, column, value):
+        if column in self._get_columns():
+            self[column] = value
+        else:
+            raise Exception("Miss match column in Model: " + column)
+
+
+class ObjectModel(AbstractModel):
+    def __init__(self, _db_config=None):
+        super().__init__(_db_config)
+
+    def _get_ak(self):
+        pass
+
+    def _set_ak(self, value):
+        pass
+
+    def _get_pk(self):
+        pass
+
+    def _get_fields(self):
+        pass
+
+    def _get_columns(self):
+        pass
+
+    def _columns(self):
+        pass
+
+    def _get_value(self, column):
+        pass
+
+    def _set_value(self, column, value):
+        pass
 
 
 class DBI:
     """
     DB engine interface.
     """
+    RETURN_NONE = 0
+    RETURN_CURSOR = 1
+    RETURN_RESULT = 2
+    RETURN_LAST_ROW_ID = 3
+    RETURN_AFFECTED_ROW = 4
 
     @staticmethod
     def get_connection(db_config=None):
@@ -441,25 +702,34 @@ class DBI:
         self._db_conf = db_config
         self._conn = pymysql.connect(**db_config)
 
+    def get_config(self):
+        return self._db_conf
+
     def close(self):
         self._conn.close()
 
-    def query(self, sql, args, fetch_result=True, affected_row=False):
+    def query(self, sql, args, return_pattern=RETURN_RESULT):
         cursor = self._conn.cursor()
         affected = cursor.execute(sql, args)
-        if fetch_result:
-            return cursor.fetchall()
-        elif affected_row is False:
+        if return_pattern == DBI.RETURN_RESULT:
+            fetched = cursor.fetchall()
+            names = [cd[0] for cd in cursor.description]
+            return [dict(zip(names, v)) for v in fetched]
+        elif return_pattern == DBI.RETURN_CURSOR:
             return cursor
-        else:
+        elif return_pattern == DBI.RETURN_LAST_ROW_ID:
+            return cursor.lastrowid
+        elif return_pattern == DBI.RETURN_AFFECTED_ROW:
             return affected
+        else:
+            return
 
     def with_transaction(self):
         _auto_commit = self._conn.get_autocommit()
         self._conn.autocommit(False)
         self._conn.begin()
         try:
-            yield self._conn
+            yield self
             self._conn.commit()
         except Exception as ex:
             self._conn.rollback()
