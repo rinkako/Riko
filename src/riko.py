@@ -2,6 +2,7 @@
 Project Riko
 
 Riko is a simple and light ORM for MySQL.
+DB Engine default to be pymysql, since not thread safe.
 """
 import contextlib
 from abc import ABCMeta, abstractmethod
@@ -89,74 +90,74 @@ class AbstractModel:
             des_obj = cls()
         if terms is not None:
             for (k, v) in terms.items():
-                des_obj._set_value(k, v)
+                des_obj.set_value(k, v)
         return des_obj
 
     def columns(self):
         """
         Get a iterator for columns in this model.
         """
-        _columns = self._get_columns()
+        _columns = self.get_columns()
         for k in _columns:
             yield k
 
     @classmethod
-    def _get_ak_name(cls):
+    def get_ak_name(cls):
         """
         Get auto increment key name of this model
         """
         return cls.ak
 
     @classmethod
-    def _get_pk_name(cls):
+    def get_pk_name(cls):
         """
         Get a list of primary key name of this model
         """
         return cls.pk
 
     @abstractmethod
-    def _get_ak(self):
+    def get_ak(self):
         """
         Get value of auto increment id field
         """
         pass
 
     @abstractmethod
-    def _set_ak(self, value):
+    def set_ak(self, value):
         """
         Set value of auto increment id field
         :param value: value to be set
         """
         pass
 
-    def _get_pk(self):
+    def get_pk(self):
         """
         Get value of primary keys into a dict
         """
         pk_dict = dict()
-        pks = self._get_pk_name()
+        pks = self.get_pk_name()
         for k in pks:
-            actual_value = self._get_value(k)
+            actual_value = self.get_value(k)
             if actual_value is not None:
                 pk_dict[k] = actual_value
         return pk_dict
 
     @abstractmethod
-    def _get_fields(self):
+    def get_fields(self):
         """
         Get fields name list, without primary keys
         """
         pass
 
     @abstractmethod
-    def _get_columns(self):
+    def get_columns(self):
         """
         Get all fields name list, with primary keys
         """
         pass
 
     @abstractmethod
-    def _get_value(self, column):
+    def get_value(self, column):
         """
         Get value of a specific field.
         :param column: field name
@@ -165,7 +166,7 @@ class AbstractModel:
         pass
 
     @abstractmethod
-    def _set_value(self, column, value):
+    def set_value(self, column, value):
         """
         Set value for a specific field
         :param column: field name
@@ -187,7 +188,7 @@ class AbstractModel:
             created = cls()
         if kwargs is not None:
             for (k, v) in kwargs.items():
-                created._set_value(k, v)
+                created.set_value(k, v)
         return created
 
     def insert(self, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION, **duplicate_key_update_term):
@@ -202,10 +203,10 @@ class AbstractModel:
             insert_dict = self
         else:
             for k in self.columns():
-                actual_value = self._get_value(k)
+                actual_value = self.get_value(k)
                 if actual_value is not None:
                     insert_dict[k] = actual_value
-        auto_key = self._get_ak_name()
+        auto_key = self.get_ak_name()
         is_replace = False
         is_ignore = False
         if on_duplicate_key_replace == INSERT.DUPLICATE_KEY_REPLACE:
@@ -217,14 +218,14 @@ class AbstractModel:
         elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
             duplicate_key_update_term = {}
         re_affect_id = (SingleInsertQuery(self.__class__)
+                        .set_session(self.db_session_)
                         .ignore(is_ignore)
                         .replace(is_replace)
                         .on_duplicate_key_update(**duplicate_key_update_term)
-                        .set_session(self.db_session_)
                         .values(**insert_dict)
                         .go(return_last_id=True if auto_key is not None else False))
-        if auto_key is not None and self._get_ak() is None:
-            self._set_ak(re_affect_id)
+        if auto_key is not None and self.get_ak() is None:
+            self.set_ak(re_affect_id)
         return re_affect_id
 
     def delete(self):
@@ -234,7 +235,7 @@ class AbstractModel:
         """
         return (DeleteQuery(self.__class__)
                 .set_session(self.db_session_)
-                .where(**self._get_pk())
+                .where(**self.get_pk())
                 .go())
 
     def save(self):
@@ -245,11 +246,11 @@ class AbstractModel:
         update_field_dict = dict()
         # TODO primary key may be update but cannot handle now
         for k in self.columns():
-            update_field_dict[k] = self._get_value(k)
+            update_field_dict[k] = self.get_value(k)
         return (UpdateQuery(self.__class__)
                 .set_session(self.db_session_)
                 .set(**update_field_dict)
-                .where(**self._get_pk())
+                .where(**self.get_pk())
                 .go())
 
     @classmethod
@@ -770,8 +771,8 @@ class BatchInsertQuery(InsertQuery):
     def values(self, insert_field_terms, insert_value_terms_many):
         """
         Set insert fields and values of multiple data rows.
-        :param insert_field_terms: tuple/list of fields to set, like ("username", "age")
-        :param insert_value_terms_many: list of tuple of values to set, like [("Nanami Touko", 17), ("Koito Yuu", 16)]
+        :param insert_field_terms: tuple/list of fields, like ("username", "age")
+        :param insert_value_terms_many: list of tuples of value, like [("Nanami Touko", 17), ("Koito Yuu", 16)]
         """
         if insert_field_terms is None or insert_value_terms_many is None:
             return self
@@ -779,6 +780,28 @@ class BatchInsertQuery(InsertQuery):
         assert type(insert_value_terms_many) in (list, tuple)
         self._insert_fields = list(insert_field_terms)
         self._insert_value_tuples.extend(insert_value_terms_many)
+        return self
+
+    def from_objects(self, insert_objs):
+        """
+        Set insert ORM object of multiple data rows.
+        :param insert_objs: list of objects, like [article1, article2], all objects must be the same type.
+        """
+        if isinstance(insert_objs, self._clz_meta):
+            insert_objs = [insert_objs]
+        assert isinstance(insert_objs, list)
+        if insert_objs is None or len(insert_objs) == 0:
+            return self
+        sampled = insert_objs[0]
+        assert isinstance(sampled, self._clz_meta)
+        self._insert_fields.extend(sampled.get_fields())
+        for t in insert_objs:
+            assert isinstance(t, self._clz_meta)
+            t_terms = list()
+            for k in self._insert_fields:
+                actual_value = t.get_value(k)
+                t_terms.append(actual_value)
+            self._insert_value_tuples.append(tuple(t_terms))
         return self
 
     def _construct_insert_values_clause(self):
@@ -1065,26 +1088,26 @@ class DictModel(AbstractModel, dict):
         dict.__init__(self)
         AbstractModel.__init__(self, _db_config)
 
-    def _get_ak(self):
+    def get_ak(self):
         if self.ak in self:
             return self[self.ak]
         else:
             return None
 
-    def _set_ak(self, value):
+    def set_ak(self, value):
         self[self.ak] = value
 
-    def _get_fields(self):
+    def get_fields(self):
         return self.fields
 
-    def _get_columns(self):
+    def get_columns(self):
         return self.pk + self.fields
 
-    def _get_value(self, column):
+    def get_value(self, column):
         return self[column] if column in self else None
 
-    def _set_value(self, column, value):
-        if column in self._get_columns():
+    def set_value(self, column, value):
+        if column in self.get_columns():
             self[column] = value
         else:
             raise Exception("Miss match column in Model: " + column)
@@ -1100,16 +1123,16 @@ class ObjectModel(AbstractModel):
         self._model_fields = None
         self._model_columns = None
 
-    def _get_ak(self):
+    def get_ak(self):
         return getattr(self, self.ak)
 
-    def _set_ak(self, value):
+    def set_ak(self, value):
         if hasattr(self, self.ak):
             setattr(self, self.ak, value)
         else:
             raise Exception("Miss match auto increment column in Model: " + self.ak)
 
-    def _get_fields(self):
+    def get_fields(self):
         if self._model_fields is None:
             self._model_fields = list(vars(self).keys())
             for _ik in self._abstract_inner_var:
@@ -1120,16 +1143,16 @@ class ObjectModel(AbstractModel):
                 self._model_fields.remove(pkt)
         return self._model_fields
 
-    def _get_columns(self):
-        return self._get_fields() + self.pk
+    def get_columns(self):
+        return self.get_fields() + self.pk
 
-    def _get_value(self, column):
+    def get_value(self, column):
         if hasattr(self, column):
             return getattr(self, column)
         else:
             return None
 
-    def _set_value(self, column, value):
+    def set_value(self, column, value):
         if hasattr(self, column):
             setattr(self, column, value)
         else:

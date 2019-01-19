@@ -85,19 +85,25 @@ if __name__ == '__main__':
     # batch insert
     articles2insert = list()
     articles2insert.append((12, "Bloom into you 1", "Test content 1"))
-    articles2insert.append((12, "Bloom into you 2", "Test content 1"))
-    articles2insert.append((12, "Bloom into you 3", "Test content 1"))
-    affected_row3 = (BlogArticle
+    articles2insert.append((12, "Bloom into you 2", "Test content 2"))
+    articles2insert.append((12, "Bloom into you 3", "Test content 3"))
+    affected_row1 = (BlogArticle
                      .insert_many()
                      .values(["author_uid", "title", "content"], articles2insert)
                      .go())
+    article_x4 = BlogArticle.create(author_uid=13, title="Bloom into you 4", content="Test content 4")
+    article_x5 = BlogArticle.create(author_uid=13, title="Bloom into you 5", content="Test content 5")
+    affected_row2 = (BlogArticle
+                     .insert_many()
+                     .from_objects([article_x4, article_x5])
+                     .go())
 
     # delete query
-    affected_row1 = (BlogRating
+    affected_row3 = (BlogRating
                      .delete_query()
                      .where(rating=99)
                      .go())
-    affected_row2 = (BlogRating
+    affected_row4 = (BlogRating
                      .delete_query()
                      .where_raw("aid >= 6", "aid <= 7")
                      .go())
