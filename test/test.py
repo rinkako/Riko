@@ -82,6 +82,16 @@ if __name__ == '__main__':
                  .values(aid=233, rating=99)
                  .go(return_last_id=True))
 
+    # batch insert
+    articles2insert = list()
+    articles2insert.append((12, "Bloom into you 1", "Test content 1"))
+    articles2insert.append((12, "Bloom into you 2", "Test content 1"))
+    articles2insert.append((12, "Bloom into you 3", "Test content 1"))
+    affected_row3 = (BlogArticle
+                     .insert_many()
+                     .values(["author_uid", "title", "content"], articles2insert)
+                     .go())
+
     # delete query
     affected_row1 = (BlogRating
                      .delete_query()

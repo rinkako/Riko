@@ -216,7 +216,7 @@ class AbstractModel:
             duplicate_key_update_term = {}
         elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
             duplicate_key_update_term = {}
-        re_affect_id = (InsertQuery(self.__class__)
+        re_affect_id = (SingleInsertQuery(self.__class__)
                         .ignore(is_ignore)
                         .replace(is_replace)
                         .on_duplicate_key_update(**duplicate_key_update_term)
@@ -321,7 +321,15 @@ class AbstractModel:
         Begin a insert query.
         :param _tx: connection context, None to use default
         """
-        return InsertQuery(cls).set_session(_tx)
+        return SingleInsertQuery(cls).set_session(_tx)
+
+    @classmethod
+    def insert_many(cls, _tx=None):
+        """
+        Begin a batch insert query.
+        :param _tx: connection context, None to use default
+        """
+        return BatchInsertQuery(cls).set_session(_tx)
 
     @classmethod
     def get(cls, _tx=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
@@ -414,6 +422,7 @@ FROM {{__RIKO_TABLE__}}
         self._clz_meta = clazz
         self._temporary_dbi = False
         self._args = dict()
+        self._is_batch = False
 
     def __str__(self):
         return self._sql
@@ -475,9 +484,12 @@ FROM {{__RIKO_TABLE__}}
         if args is not None:
             self._args.update(args)
         try:
-            return self._dbi.query(self._sql, self._args,
-                                   return_pattern=DBI.RETURN_AFFECTED_ROW
-                                   if return_last_id is False else DBI.RETURN_LAST_ROW_ID)
+            if self._is_batch is False:
+                return self._dbi.query(self._sql, self._args,
+                                       return_pattern=DBI.RETURN_AFFECTED_ROW
+                                       if return_last_id is False else DBI.RETURN_LAST_ROW_ID)
+            else:
+                return self._dbi.insert_many(self._sql, self._args)
         finally:
             if self._temporary_dbi:
                 self._dbi.close()
@@ -642,37 +654,7 @@ class InsertQuery(SqlQuery):
         self._on_duplicate_key_ignore = False
         self._on_duplicate_key_replace = False
         self._insert_fields = list()
-        self._insert_values = list()
         self._duplicate_update = list()
-
-    def values_raw(self, insert_field_terms, insert_value_terms):
-        """
-        Set insert fields and values.
-        :param insert_field_terms: tuple/list of fields to set, like ("username", "age")
-        :param insert_value_terms: tuple/list of values to set, like ("Nanami Touko", 17)
-        """
-        if insert_value_terms is None or insert_value_terms is None:
-            return self
-        assert len(insert_field_terms) == len(insert_value_terms)
-        if insert_field_terms is not None:
-            if type(insert_field_terms) in (list, tuple):
-                self._insert_fields.extend(insert_field_terms)
-                self._insert_values.extend(insert_value_terms)
-            else:
-                self._insert_fields.append(str(insert_field_terms))
-                self._insert_values.append(str(insert_value_terms))
-        return self
-
-    def values(self, **insert_terms):
-        """
-        Set insert fields and values.
-        :param insert_terms: key-value pair to give field and its value, like `username="Nanami Touko", age=17`
-        """
-        for (k, v) in insert_terms.items():
-            self._insert_fields.append(k)
-            self._insert_values.append("%(__RIKO_VALUES_" + k + ")s")
-            self._args["__RIKO_VALUES_" + k] = v
-        return self
 
     def on_duplicate_key_update_raw(self, *update_terms):
         """
@@ -720,16 +702,52 @@ class InsertQuery(SqlQuery):
         assert len(self._insert_fields) > 0
         return ", ".join(self._insert_fields)
 
-    def _construct_insert_values_clause(self):
-        assert len(self._insert_values) > 0
-        return ", ".join(self._insert_values)
-
     def _construct_on_duplicate_key_update_clause(self):
         if self._on_duplicate_key_ignore is True or \
                 self._on_duplicate_key_replace is True or \
                 len(self._duplicate_update) == 0:
             return ""
         return "ON DUPLICATE KEY UPDATE " + ", ".join(self._duplicate_update)
+
+    def _prepare_sql(self):
+        pass
+
+
+class SingleInsertQuery(InsertQuery):
+    def __init__(self, clazz):
+        super().__init__(clazz)
+        self._insert_values = list()
+
+    def values_raw(self, insert_field_terms, insert_value_terms):
+        """
+        Set insert fields and values.
+        :param insert_field_terms: tuple/list of fields to set, like ("username", "age")
+        :param insert_value_terms: tuple/list of values to set, like ("Nanami Touko", 17)
+        """
+        if insert_field_terms is None or insert_value_terms is None:
+            return self
+        assert len(insert_field_terms) == len(insert_value_terms)
+        if type(insert_field_terms) in (list, tuple):
+            self._insert_fields.extend(insert_field_terms)
+            self._insert_values.extend(insert_value_terms)
+        else:
+            self._insert_fields.append(str(insert_field_terms))
+            self._insert_values.append(str(insert_value_terms))
+
+    def values(self, **insert_terms):
+        """
+        Set insert fields and values.
+        :param insert_terms: key-value pair to give field and its value, like `username="Nanami Touko", age=17`
+        """
+        for (k, v) in insert_terms.items():
+            self._insert_fields.append(k)
+            self._insert_values.append("%(__RIKO_VALUES_" + k + ")s")
+            self._args["__RIKO_VALUES_" + k] = v
+        return self
+
+    def _construct_insert_values_clause(self):
+        assert len(self._insert_values) > 0
+        return ", ".join(self._insert_values)
 
     def _prepare_sql(self):
         self._sql = SqlQuery._Insert_Template
@@ -740,6 +758,46 @@ class InsertQuery(SqlQuery):
             SqlQuery._KW_VALUES: self._construct_insert_values_clause(),
             SqlQuery._KW_ON_DUPLICATE_KEY_UPDATE: self._construct_on_duplicate_key_update_clause()
         }
+        self._sql = SqlRender.render(self._sql, r_dict)
+
+
+class BatchInsertQuery(InsertQuery):
+    def __init__(self, clazz):
+        super().__init__(clazz)
+        self._insert_value_tuples = list()
+        self._is_batch = True
+
+    def values(self, insert_field_terms, insert_value_terms_many):
+        """
+        Set insert fields and values of multiple data rows.
+        :param insert_field_terms: tuple/list of fields to set, like ("username", "age")
+        :param insert_value_terms_many: list of tuple of values to set, like [("Nanami Touko", 17), ("Koito Yuu", 16)]
+        """
+        if insert_field_terms is None or insert_value_terms_many is None:
+            return self
+        assert type(insert_field_terms) in (list, tuple)
+        assert type(insert_value_terms_many) in (list, tuple)
+        self._insert_fields = list(insert_field_terms)
+        self._insert_value_tuples.extend(insert_value_terms_many)
+        return self
+
+    def _construct_insert_values_clause(self):
+        assert len(self._insert_value_tuples) > 0 and len(self._insert_fields) > 0
+        placeholder = list()
+        for x in range(0, len(self._insert_fields)):
+            placeholder.append("%s")
+        return ", ".join(placeholder)
+
+    def _prepare_sql(self):
+        self._sql = SqlQuery._Insert_Template
+        r_dict = {
+            SqlQuery._KW_INSERT_REPLACE: self._construct_insert_operator_clause(),
+            SqlQuery._KW_TABLE: self._clz_meta.__name__,
+            SqlQuery._KW_FIELDS: self._construct_insert_fields_clause(),
+            SqlQuery._KW_VALUES: self._construct_insert_values_clause(),
+            SqlQuery._KW_ON_DUPLICATE_KEY_UPDATE: self._construct_on_duplicate_key_update_clause()
+        }
+        self._args = self._insert_value_tuples
         self._sql = SqlRender.render(self._sql, r_dict)
 
 
@@ -1140,6 +1198,16 @@ class DBI:
             return affected
         else:
             return
+
+    def insert_many(self, sql_tpl, args):
+        """
+        Perform multiple insert query.
+        :param sql_tpl: insert sql template
+        :param args: args for insert values in tuple in list
+        :return: affected row count
+        """
+        cursor = self._conn.cursor()
+        return cursor.executemany(sql_tpl, args)
 
     @contextlib.contextmanager
     def transaction(self):
