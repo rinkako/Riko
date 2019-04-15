@@ -53,27 +53,33 @@ class Riko:
         Riko.db_config.update(db_config)
 
 
-class AbstractModel:
+class AbstractModel(metaclass=ABCMeta):
+    __metaclass__ = ABCMeta
+
     """
     Abstract ORM model.
     DO NOT inherit this, inherit `DictModel` or `ObjectModel` instead.
     """
-    __metaclass__ = ABCMeta
-    _abstract_inner_var = {"db_config_", "db_session_"}
+    _abstract_inner_var = {"db_config_", "dbi"}
+
+    # Config
+    _DB_CONF = None
 
     # Auto increment key
     ak = None
 
     # Primary key list
-    pk = []
+    pk = ()
 
     def __init__(self, _db_config=None):
         """
         Create a Riko model object.
         :param _db_config: database to mapping
         """
+        if _db_config is None:
+            _db_config = self._DB_CONF
         self.db_config_ = Riko.db_config if _db_config is None else _db_config
-        self.db_session_ = DBI.get_connection(self.db_config_)
+        self.dbi = DBI.get_connection(self.db_config_)
 
     @classmethod
     def deserialize(cls, db_conf, **terms):
@@ -175,6 +181,16 @@ class AbstractModel:
         pass
 
     @classmethod
+    def new(cls, _db_config=None, **kwargs):
+        """
+        Create a new ORM object, but not save to DB. Alias for `create`.
+        :param _db_config: db connection config, None to use default
+        :param kwargs: terms for init object
+        :return: created ORM object
+        """
+        return cls.create(_db_config=_db_config, **kwargs)
+
+    @classmethod
     def create(cls, _db_config=None, **kwargs):
         """
         Create a new ORM object, but not save to DB.
@@ -191,9 +207,10 @@ class AbstractModel:
                 created.set_value(k, v)
         return created
 
-    def insert(self, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION, **duplicate_key_update_term):
+    def insert(self, t=None, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION, **duplicate_key_update_term):
         """
         Insert this object into DB.
+        :param t transaction connection object
         :param on_duplicate_key_replace: operation when primary key duplicated
         :param duplicate_key_update_term: terms for `ON DUPLICATE KEY UPDATE`
         :return: if `ak` is declared, return inserted auto increment id, otherwise return affected row count
@@ -218,7 +235,7 @@ class AbstractModel:
         elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
             duplicate_key_update_term = {}
         re_affect_id = (SingleInsertQuery(self.__class__)
-                        .set_session(self.db_session_)
+                        .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
                         .ignore(is_ignore)
                         .replace(is_replace)
                         .on_duplicate_key_update(**duplicate_key_update_term)
@@ -228,19 +245,29 @@ class AbstractModel:
             self.set_ak(re_affect_id)
         return re_affect_id
 
-    def delete(self):
+    def delete(self, t=None):
         """
         Delete this object from DB.
+        :param t transaction connection object
         :return: affected row count
         """
         return (DeleteQuery(self.__class__)
-                .set_session(self.db_session_)
+                .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
                 .where(**self.get_pk())
                 .go())
 
-    def save(self):
+    def update(self, t=None):
+        """
+        Flush the change of this object to DB. Alias for `save`.
+        :param t transaction connection object
+        :return: affected row count
+        """
+        return self.save(t=t)
+
+    def save(self, t=None):
         """
         Flush the change of this object to DB.
+        :param t transaction connection object
         :return: affected row count
         """
         update_field_dict = dict()
@@ -248,22 +275,22 @@ class AbstractModel:
         for k in self.columns():
             update_field_dict[k] = self.get_value(k)
         return (UpdateQuery(self.__class__)
-                .set_session(self.db_session_)
+                .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
                 .set(**update_field_dict)
                 .where(**self.get_pk())
                 .go())
 
     @classmethod
-    def count(cls, _tx=None, _where_raw=None, _args=None, **_where_terms):
+    def count(cls, t=None, _where_raw=None, _args=None, **_where_terms):
         """
         Count object satisfied given conditions.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a number of count result
         """
-        cnt_ret = cls.get(_tx=_tx, return_columns=("count(1)",), _where_raw=_where_raw,
+        cnt_ret = cls.get(t=t, return_columns=("count(1)",), _where_raw=_where_raw,
                           _args=_args, _parse_model=False, **_where_terms)
         if len(cnt_ret) > 0:
             return cnt_ret[0]["count(1)"]
@@ -271,73 +298,73 @@ class AbstractModel:
             return 0
 
     @classmethod
-    def has(cls, _tx=None, _where_raw=None, _args=None, **_where_terms):
+    def has(cls, t=None, _where_raw=None, _args=None, **_where_terms):
         """
         Find is there any object satisfied given conditions.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a boolean of existence find result
         """
-        return cls.count(_tx=_tx, _where_raw=_where_raw, _args=_args, **_where_terms) > 0
+        return cls.count(t=t, _where_raw=_where_raw, _args=_args, **_where_terms) > 0
 
     @classmethod
-    def select(cls, _tx=None, return_columns=None):
+    def select(cls, t=None, return_columns=None):
         """
         Begin a select query.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         """
-        return SelectQuery(cls, return_columns).set_session(_tx)
+        return SelectQuery(cls, return_columns).set_session(model_db_conf=cls._DB_CONF, dbi=t)
 
     @classmethod
-    def select_query(cls, _tx=None, return_columns=None):
+    def select_query(cls, t=None, return_columns=None):
         """
         Begin a select query.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         """
-        return cls.select(_tx=_tx, return_columns=return_columns)
+        return cls.select(t=t, return_columns=return_columns)
 
     @classmethod
-    def delete_query(cls, _tx=None):
+    def delete_query(cls, t=None):
         """
         Begin a delete query.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         """
-        return DeleteQuery(cls).set_session(_tx)
+        return DeleteQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
 
     @classmethod
-    def update_query(cls, _tx=None):
+    def update_query(cls, t=None):
         """
         Begin a update query.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         """
-        return UpdateQuery(cls).set_session(_tx)
+        return UpdateQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
 
     @classmethod
-    def insert_query(cls, _tx=None):
+    def insert_query(cls, t=None):
         """
         Begin a insert query.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         """
-        return SingleInsertQuery(cls).set_session(_tx)
+        return SingleInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
 
     @classmethod
-    def insert_many(cls, _tx=None):
+    def insert_many(cls, t=None):
         """
         Begin a batch insert query.
-        :param _tx: connection context, None to use default
+        :param t: connection context, None to use default
         """
-        return BatchInsertQuery(cls).set_session(_tx)
+        return BatchInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
 
     @classmethod
-    def get(cls, _tx=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
-            _order=None, _args=None, _parse_model=True, **_where_terms):
+    def get_many(cls, t=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
+                 _order=None, _args=None, _parse_model=True, for_update=False, **_where_terms):
         """
-        Get objects satisfied given conditions.
-        :param _tx: connection context, None to use default
+        Get objects satisfied given conditions. Alias for `get`.
+        :param t: connection context, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _limit: limit of query result row number
@@ -345,34 +372,61 @@ class AbstractModel:
         :param _order: ordering fields name tuple
         :param _args: argument dict for SQL rendering
         :param _parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
+        :param for_update: Is select for update
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
+        return cls.get(t=t, return_columns=return_columns, _where_raw=_where_raw, _limit=_limit, _offset=_offset,
+                       _order=_order, _args=_args, _parse_model=_parse_model, for_update=for_update, **_where_terms)
+
+    @classmethod
+    def get(cls, t=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
+            _order=None, _args=None, _parse_model=True, for_update=False, **_where_terms):
+        """
+        Get objects satisfied given conditions.
+        :param t: connection context, None to use default
+        :param return_columns: return columns tuple, None to return all fields in mapping table
+        :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
+        :param _limit: limit of query result row number
+        :param _offset: offset of query result
+        :param _order: ordering fields name tuple
+        :param _args: argument dict for SQL rendering
+        :param _parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
+        :param for_update: Is select for update
+        :param _where_terms: where condition te rms, only equal condition support only, combined with `AND`
+        :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
+        """
         return (SelectQuery(cls, columns=return_columns, limit=_limit, offset=_offset, order_by=_order)
-                .set_session(_tx)
+                .set_session(model_db_conf=cls._DB_CONF, dbi=t)
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
+                .for_update(for_update)
                 .get(_args, parse_model=_parse_model))
 
     @classmethod
-    def get_one(cls, _tx=None, return_columns=None, _where_raw=None, _args=None, **_where_terms):
+    def get_one(cls, t=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
+                for_update=False, **_where_terms):
         """
-
-        :param _tx: connection context, None to use default
+        Get one object satisfied given conditions if exists, otherwise return `None`.
+        :param t: connection context, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
+        :param _parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
+        :param for_update: Is select for update
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a ORM model object, or None if not found
         """
         return (SelectQuery(cls, columns=return_columns)
-                .set_session(_tx)
+                .set_session(model_db_conf=cls._DB_CONF, dbi=t)
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
-                .only(_args))
+                .limit(1)
+                .for_update(for_update)
+                .only(parse_model=_parse_model, args=_args))
 
 
-class SqlQuery:
+class SqlQuery(metaclass=ABCMeta):
     __metaclass__ = ABCMeta
 
     _KW_TABLE = "{{__RIKO_TABLE__}}"
@@ -388,6 +442,7 @@ class SqlQuery:
     _KW_ORDER_BY = "{{__RIKO_ORDER_BY__}}"
     _KW_LIMIT = "{{__RIKO_LIMIT__}}"
     _KW_OFFSET = "{{__RIKO_OFFSET__}}"
+    _KW_FORUPDATE = "{{__RIKO_FOR_UPDATE__}}"
 
     _Insert_Template = """
 {{__RIKO_INSERT_REPLACE__}} INTO {{__RIKO_TABLE__}}({{__RIKO_FIELDS__}})
@@ -414,6 +469,7 @@ FROM {{__RIKO_TABLE__}}
 {{__RIKO_ORDER_BY__}}
 {{__RIKO_LIMIT__}}
 {{__RIKO_OFFSET__}}
+{{__RIKO_FOR_UPDATE__}}
 """
 
     def __init__(self, clazz):
@@ -428,13 +484,16 @@ FROM {{__RIKO_TABLE__}}
     def __str__(self):
         return self._sql
 
-    def set_session(self, dbi=None):
+    def set_session(self, model_db_conf, dbi):
         """
         Binding db session for ORM operations.
+        :param model_db_conf: model _DB_CONF
         :param dbi: DBI object
         """
         if dbi is None:
-            self._dbi = DBI(Riko.db_config)
+            if model_db_conf is None:
+                model_db_conf = Riko.db_config
+            self._dbi = DBI(model_db_conf)
             self._temporary_dbi = True
         else:
             self._dbi = dbi
@@ -458,10 +517,11 @@ FROM {{__RIKO_TABLE__}}
         return [self._clz_meta.deserialize(self._dbi.get_config(), **kvt) for kvt in raw_result] \
             if parse_model else raw_result
 
-    def only(self, args=None):
+    def only(self, parse_model=False, args=None):
         """
         Execute and get result of query, but only one object will be returned.
         :param args: argument dict for SQL rendering
+        :param parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
         :return: a ORM model object, or None if not found
         """
         self._prepare_sql()
@@ -469,7 +529,11 @@ FROM {{__RIKO_TABLE__}}
             self._args.update(args)
         try:
             ret = self._dbi.query(self._sql, self._args)
-            return ret[0] if ret and len(ret) > 0 else None
+            ret_raw = ret[0] if ret and len(ret) > 0 else None
+            if parse_model is False or ret_raw is None:
+                return ret_raw
+            else:
+                return self._clz_meta.deserialize(self._dbi.get_config(), **ret_raw)
         finally:
             if self._temporary_dbi:
                 self._dbi.close()
@@ -879,6 +943,7 @@ class SelectQuery(PaginationOrderQuery):
         super().__init__(clazz, where, limit, offset, order_by)
         self._return_columns = list() if columns is None else list(columns)
         self._distinct = False
+        self._for_update = False
         self._group_by = list()
         self._having = list()
         self._alias = None
@@ -892,6 +957,14 @@ class SelectQuery(PaginationOrderQuery):
         :param alias: alias table name
         """
         self._alias = alias
+        return self
+
+    def for_update(self, is_for_update=True):
+        """
+        Set SELECT FOR UPDATE for query.
+        :param is_for_update: is select for update mode, default True
+        """
+        self._for_update = is_for_update
         return self
 
     def distinct(self, is_distinct=True):
@@ -1012,6 +1085,9 @@ class SelectQuery(PaginationOrderQuery):
     def _construct_distinct_clause(self):
         return "DISTINCT" if self._distinct else ""
 
+    def _construct_for_update_clause(self):
+        return "FOR UPDATE" if self._for_update else ""
+
     def _construct_select_fields_clause(self):
         if len(self._return_columns) == 0:
             return "*"
@@ -1053,6 +1129,7 @@ class SelectQuery(PaginationOrderQuery):
             SqlQuery._KW_ORDER_BY: self._construct_order_by_clause(),
             SqlQuery._KW_LIMIT: self._construct_limit_clause(),
             SqlQuery._KW_OFFSET: self._construct_offset_clause(),
+            SqlQuery._KW_FORUPDATE: self._construct_for_update_clause(),
         }
         self._sql = SqlRender.render(self._sql, r_dict)
 
@@ -1078,7 +1155,7 @@ class DictModel(AbstractModel, dict):
     """
 
     # Fields list
-    fields = []
+    fields = ()
 
     def __init__(self, _db_config=None):
         """
@@ -1101,13 +1178,14 @@ class DictModel(AbstractModel, dict):
         return self.fields
 
     def get_columns(self):
-        return self.pk + self.fields
+        return tuple(self.pk) + tuple(self.fields)
 
     def get_value(self, column):
         return self[column] if column in self else None
 
     def set_value(self, column, value):
-        if column in self.get_columns():
+        cols = self.get_columns()
+        if column in cols:
             self[column] = value
         else:
             raise Exception("Miss match column in Model: " + column)
@@ -1144,7 +1222,7 @@ class ObjectModel(AbstractModel):
         return self._model_fields
 
     def get_columns(self):
-        return self.get_fields() + self.pk
+        return tuple(self.get_fields()) + tuple(self.pk)
 
     def get_value(self, column):
         if hasattr(self, column):
@@ -1196,44 +1274,74 @@ class DBI:
         """
         self._conn.close()
 
-    def query(self, sql, args, return_pattern=RETURN_RESULT):
+    def query(self, sql, args, t=None, return_pattern=RETURN_RESULT):
         """
         Perform a raw query.
         :param sql: sql to perform
         :param args: argument dict for sql rendering
+        :param t: connection provider
         :param return_pattern: result return pattern, default `RETURN_RESULT`
         :return: RETURN_RESULT       - a list of dict objects
                  RETURN_CURSOR       - a cursor for fetching result
                  RETURN_LAST_ROW_ID  - inserted record auto increment id
                  RETURN_AFFECTED_ROW - query affected row count
         """
-        cursor = self._conn.cursor()
-        affected = cursor.execute(sql, args)
-        if return_pattern == DBI.RETURN_RESULT:
-            fetched = cursor.fetchall()
-            names = [cd[0] for cd in cursor.description]
-            return [dict(zip(names, v)) for v in fetched]
-        elif return_pattern == DBI.RETURN_CURSOR:
-            return cursor
-        elif return_pattern == DBI.RETURN_LAST_ROW_ID:
-            return cursor.lastrowid
-        elif return_pattern == DBI.RETURN_AFFECTED_ROW:
-            return affected
+        _conn = t or self._conn
+        _reconn = False if t else True
+        ret_val = None
+        try:
+            _conn.ping(reconnect=_reconn)
+            cursor = self._conn.cursor()
+            # import logging
+            # logger = logging.getLogger("ORM_QUERY")
+            # logger.info(sql)
+            # logger.info(args)
+            affected = cursor.execute(sql, args)
+            if return_pattern == DBI.RETURN_RESULT:
+                fetched = cursor.fetchall()
+                # names = [cd[0] for cd in cursor.description]
+                # ret_val = [dict(zip(names, v)) for v in fetched]
+                ret_val = fetched
+            elif return_pattern == DBI.RETURN_CURSOR:
+                ret_val = cursor
+            elif return_pattern == DBI.RETURN_LAST_ROW_ID:
+                ret_val = cursor.lastrowid
+            elif return_pattern == DBI.RETURN_AFFECTED_ROW:
+                ret_val = affected
+        except Exception as ex:
+            if not t:
+                _conn.rollback()
+            raise ex
         else:
-            return
+            if not t:
+                _conn.commit()
+            return ret_val
 
-    def insert_many(self, sql_tpl, args):
+    def insert_many(self, sql_tpl, args, t=None):
         """
         Perform multiple insert query.
         :param sql_tpl: insert sql template
         :param args: args for insert values in tuple in list
+        :param t: connection provider
         :return: affected row count
         """
-        cursor = self._conn.cursor()
-        return cursor.executemany(sql_tpl, args)
+        _conn = t or self._conn
+        _reconn = False if t else True
+        try:
+            _conn.ping(reconnect=_reconn)
+            cursor = self._conn.cursor()
+            ret_val = cursor.executemany(sql_tpl, args)
+        except Exception as ex:
+            if not t:
+                _conn.rollback()
+            raise ex
+        else:
+            if not t:
+                _conn.commit()
+            return ret_val
 
     @contextlib.contextmanager
-    def transaction(self):
+    def start_transaction(self):
         """
         Create a scoped context with all operations as one transaction.
         """
