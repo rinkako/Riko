@@ -6,6 +6,7 @@ DB Engine default to be pymysql, since not thread safe.
 """
 import contextlib
 from abc import ABCMeta, abstractmethod
+from datetime import date, datetime as dt
 import pymysql
 
 
@@ -82,11 +83,12 @@ class AbstractModel(metaclass=ABCMeta):
         self.dbi = DBI.get_connection(self.db_config_)
 
     @classmethod
-    def deserialize(cls, db_conf, **terms):
+    def deserialize(cls, db_conf, _datetime_dump=True, **terms):
         """
         Parse a dict-like object to `cls` object.
         For internal use, do not use it in your application.
         :param db_conf: db connection config
+        :param _datetime_dump: ensure datetime and date translated to string
         :param terms: dict for parsing to the model object
         :return: parsed object in `cls` type
         """
@@ -96,6 +98,11 @@ class AbstractModel(metaclass=ABCMeta):
             des_obj = cls()
         if terms is not None:
             for (k, v) in terms.items():
+                if _datetime_dump:
+                    if isinstance(v, dt):
+                        v = v.strftime('%Y-%m-%d %H:%M:%S')
+                    elif isinstance(v, date):
+                        v = v.strftime('%Y-%m-%d')
                 des_obj.set_value(k, v)
         return des_obj
 
@@ -256,24 +263,31 @@ class AbstractModel(metaclass=ABCMeta):
                 .where(**self.get_pk())
                 .go())
 
-    def update(self, t=None):
+    def update(self, ignore_columns=None, t=None):
         """
         Flush the change of this object to DB. Alias for `save`.
+        :param ignore_columns: the columns to be ignore when update, such as `update_time`
         :param t transaction connection object
         :return: affected row count
         """
-        return self.save(t=t)
+        return self.save(ignore_columns=ignore_columns, t=t)
 
-    def save(self, t=None):
+    def save(self, ignore_columns=None, t=None):
         """
         Flush the change of this object to DB.
+        :param ignore_columns: the columns to be ignore when update, such as `update_time`
         :param t transaction connection object
         :return: affected row count
         """
         update_field_dict = dict()
         # TODO primary key may be update but cannot handle now
+        if ignore_columns is None:
+            ignore_columns = {}
+        else:
+            ignore_columns = set(ignore_columns)
         for k in self.columns():
-            update_field_dict[k] = self.get_value(k)
+            if k not in ignore_columns:
+                update_field_dict[k] = self.get_value(k)
         return (UpdateQuery(self.__class__)
                 .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
                 .set(**update_field_dict)
@@ -361,7 +375,7 @@ class AbstractModel(metaclass=ABCMeta):
 
     @classmethod
     def get_many(cls, t=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
-                 _order=None, _args=None, _parse_model=True, for_update=False, **_where_terms):
+                 _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions. Alias for `get`.
         :param t: connection context, None to use default
@@ -373,15 +387,17 @@ class AbstractModel(metaclass=ABCMeta):
         :param _args: argument dict for SQL rendering
         :param _parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
         :param for_update: Is select for update
+        :param _datetime_dump: ensure datetime and date translated to string
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
         return cls.get(t=t, return_columns=return_columns, _where_raw=_where_raw, _limit=_limit, _offset=_offset,
-                       _order=_order, _args=_args, _parse_model=_parse_model, for_update=for_update, **_where_terms)
+                       _order=_order, _args=_args, _parse_model=_parse_model, for_update=for_update,
+                       _datetime_dump=_datetime_dump, **_where_terms)
 
     @classmethod
     def get(cls, t=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
-            _order=None, _args=None, _parse_model=True, for_update=False, **_where_terms):
+            _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions.
         :param t: connection context, None to use default
@@ -393,6 +409,7 @@ class AbstractModel(metaclass=ABCMeta):
         :param _args: argument dict for SQL rendering
         :param _parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
         :param for_update: Is select for update
+        :param _datetime_dump: ensure datetime and date translated to string
         :param _where_terms: where condition te rms, only equal condition support only, combined with `AND`
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
@@ -401,11 +418,11 @@ class AbstractModel(metaclass=ABCMeta):
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
                 .for_update(for_update)
-                .get(_args, parse_model=_parse_model))
+                .get(args=_args, _datetime_dump=_datetime_dump, parse_model=_parse_model))
 
     @classmethod
     def get_one(cls, t=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
-                for_update=False, **_where_terms):
+                for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get one object satisfied given conditions if exists, otherwise return `None`.
         :param t: connection context, None to use default
@@ -414,6 +431,7 @@ class AbstractModel(metaclass=ABCMeta):
         :param _args: argument dict for SQL rendering
         :param _parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
         :param for_update: Is select for update
+        :param _datetime_dump: ensure datetime and date translated to string
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a ORM model object, or None if not found
         """
@@ -423,7 +441,7 @@ class AbstractModel(metaclass=ABCMeta):
                 .where(**_where_terms)
                 .limit(1)
                 .for_update(for_update)
-                .only(parse_model=_parse_model, args=_args))
+                .only(args=_args, _datetime_dump=_datetime_dump, parse_model=_parse_model))
 
 
 class SqlQuery(metaclass=ABCMeta):
@@ -499,10 +517,11 @@ FROM {{__RIKO_TABLE__}}
             self._dbi = dbi
         return self
 
-    def get(self, args=None, parse_model=False):
+    def get(self, args=None, _datetime_dump=True, parse_model=False):
         """
         Execute and get result of query.
         :param args: argument dict for SQL rendering
+        :param _datetime_dump: ensure datetime and date translated to string
         :param parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
         :return: see `parse_model` parameter description
         """
@@ -514,13 +533,24 @@ FROM {{__RIKO_TABLE__}}
         finally:
             if self._temporary_dbi:
                 self._dbi.close()
-        return [self._clz_meta.deserialize(self._dbi.get_config(), **kvt) for kvt in raw_result] \
-            if parse_model else raw_result
+        if parse_model:
+            return [self._clz_meta.deserialize(db_conf=self._dbi.get_config(), _datetime_dump=_datetime_dump, **kvt)
+                    for kvt in raw_result]
+        else:
+            if _datetime_dump:
+                for raw_item in raw_result:
+                    for (k, v) in raw_item.items():
+                        if isinstance(v, dt):
+                            raw_item[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+                        elif isinstance(v, date):
+                            raw_item[k] = v.strftime('%Y-%m-%d')
+            return raw_result
 
-    def only(self, parse_model=False, args=None):
+    def only(self, parse_model=False, _datetime_dump=True, args=None):
         """
         Execute and get result of query, but only one object will be returned.
         :param args: argument dict for SQL rendering
+        :param _datetime_dump: ensure datetime and date translated to string
         :param parse_model: True to parse result to a list of ORM model objects, False to get list of dict objects
         :return: a ORM model object, or None if not found
         """
@@ -530,10 +560,20 @@ FROM {{__RIKO_TABLE__}}
         try:
             ret = self._dbi.query(self._sql, self._args)
             ret_raw = ret[0] if ret and len(ret) > 0 else None
-            if parse_model is False or ret_raw is None:
+            if ret_raw is None:
+                return None
+            if parse_model is False:
+                if _datetime_dump:
+                    for (k, v) in ret_raw.items():
+                        if _datetime_dump:
+                            if isinstance(v, dt):
+                                ret_raw[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+                            elif isinstance(v, date):
+                                ret_raw[k] = v.strftime('%Y-%m-%d')
                 return ret_raw
             else:
-                return self._clz_meta.deserialize(self._dbi.get_config(), **ret_raw)
+                return self._clz_meta.deserialize(db_conf=self._dbi.get_config(),
+                                                  _datetime_dump=_datetime_dump, **ret_raw)
         finally:
             if self._temporary_dbi:
                 self._dbi.close()
@@ -604,6 +644,8 @@ class ConditionQuery(SqlQuery):
                 self._where = [str(where)]
         else:
             self._where = list()
+        self._where_in = dict()
+        self._where_not_in = dict()
 
     def where_raw(self, *condition_terms):
         """
@@ -623,7 +665,53 @@ class ConditionQuery(SqlQuery):
             self._args["__RIKO_WHERE_" + k] = v
         return self
 
+    def where_in(self, term_name, candidate_values):
+        """
+        Set WHERE `term_name IN candidate_values` condition by given pattern, combined with `AND`.
+        :param term_name: field name
+        :param candidate_values: candidate value in list
+        """
+        if len(candidate_values) > 0:
+            if term_name not in self._where_in:
+                self._where_in[term_name] = list()
+            self._where_in[term_name].extend(candidate_values)
+        return self
+
+    def where_not_in(self, term_name, candidate_values):
+        """
+        Set WHERE `term_name IN candidate_values` condition by given pattern, combined with `AND`.
+        :param term_name: field name
+        :param candidate_values: candidate value in list
+        """
+        if len(candidate_values) > 0:
+            if term_name not in self._where_not_in:
+                self._where_not_in[term_name] = list()
+            self._where_not_in[term_name].extend(candidate_values)
+        return self
+
     def _construct_where_clause(self):
+        in_term = ""
+        if len(self._where_in) > 0:
+            in_term_list = list()
+            for (in_key, in_val) in self._where_in.items():
+                current_term_list = list()
+                for val_item in in_val:
+                    current_term_list.append("'%s'" % val_item)
+                in_term_list.append(in_key + " IN (" + ",".join(current_term_list) + ")")
+            in_term += " AND ".join(in_term_list)
+        not_term = ""
+        if len(self._where_not_in) > 0:
+            not_term_list = list()
+            for (not_key, not_val) in self._where_not_in.items():
+                current_term_list = list()
+                for val_item in not_val:
+                    current_term_list.append("'%s'" % val_item)
+                not_term_list.append(not_key + " NOT IN (" + ",".join(current_term_list) + ")")
+            not_term += " AND ".join(not_term_list)
+        if in_term != "":
+            self._where.append(in_term)
+        if not_term != "":
+            self._where.append(not_term)
         if len(self._where) == 0:
             return ""
         return "WHERE " + " AND ".join(self._where)
@@ -1292,10 +1380,10 @@ class DBI:
         try:
             _conn.ping(reconnect=_reconn)
             cursor = self._conn.cursor()
-            # import logging
-            # logger = logging.getLogger("ORM_QUERY")
-            # logger.info(sql)
-            # logger.info(args)
+            import logging
+            logger = logging.getLogger("ORM_QUERY")
+            logger.info(sql)
+            logger.info(args)
             affected = cursor.execute(sql, args)
             if return_pattern == DBI.RETURN_RESULT:
                 fetched = cursor.fetchall()
