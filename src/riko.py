@@ -5,6 +5,7 @@ Riko is a simple and light ORM for MySQL.
 DB Engine default to be pymysql, since not thread safe.
 """
 import contextlib
+import logging
 from abc import ABCMeta, abstractmethod
 from datetime import date, datetime as dt
 import pymysql
@@ -72,6 +73,9 @@ class AbstractModel(metaclass=ABCMeta):
     # Primary key list
     pk = ()
 
+    # Update ignore column
+    auto_update_ignore = None
+
     def __init__(self, _db_config=None):
         """
         Create a Riko model object.
@@ -80,7 +84,6 @@ class AbstractModel(metaclass=ABCMeta):
         if _db_config is None:
             _db_config = self._DB_CONF
         self.db_config_ = Riko.db_config if _db_config is None else _db_config
-        self.dbi = DBI.get_connection(self.db_config_)
 
     @classmethod
     def deserialize(cls, db_conf, _datetime_dump=True, **terms):
@@ -93,8 +96,8 @@ class AbstractModel(metaclass=ABCMeta):
         :return: parsed object in `cls` type
         """
         try:
-            des_obj = cls(db_conf)
-        except:
+            des_obj = cls(_db_config=db_conf)
+        except Exception as ce:
             des_obj = cls()
         if terms is not None:
             for (k, v) in terms.items():
@@ -242,7 +245,7 @@ class AbstractModel(metaclass=ABCMeta):
         elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
             duplicate_key_update_term = {}
         re_affect_id = (SingleInsertQuery(self.__class__)
-                        .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
+                        .set_session(model_db_conf=self._DB_CONF, dbi=t)
                         .ignore(is_ignore)
                         .replace(is_replace)
                         .on_duplicate_key_update(**duplicate_key_update_term)
@@ -259,7 +262,7 @@ class AbstractModel(metaclass=ABCMeta):
         :return: affected row count
         """
         return (DeleteQuery(self.__class__)
-                .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
+                .set_session(model_db_conf=self._DB_CONF, dbi=t)
                 .where(**self.get_pk())
                 .go())
 
@@ -282,14 +285,17 @@ class AbstractModel(metaclass=ABCMeta):
         update_field_dict = dict()
         # TODO primary key may be update but cannot handle now
         if ignore_columns is None:
-            ignore_columns = {}
+            ignore_columns = set()
         else:
             ignore_columns = set(ignore_columns)
+        # extend default ignore columns
+        if self.auto_update_ignore is not None:
+            ignore_columns.update(set(self.auto_update_ignore))
         for k in self.columns():
             if k not in ignore_columns:
                 update_field_dict[k] = self.get_value(k)
         return (UpdateQuery(self.__class__)
-                .set_session(model_db_conf=self._DB_CONF, dbi=t if t is not None else self.dbi)
+                .set_session(model_db_conf=self._DB_CONF, dbi=t)
                 .set(**update_field_dict)
                 .where(**self.get_pk())
                 .go())
@@ -322,6 +328,23 @@ class AbstractModel(metaclass=ABCMeta):
         :return: a boolean of existence find result
         """
         return cls.count(t=t, _where_raw=_where_raw, _args=_args, **_where_terms) > 0
+
+    @classmethod
+    def delete_many(cls, t=None, _where_raw=None, _args=None, **_where_terms):
+        """
+        Delete all records satisfied given conditions.
+        :param t: connection context, None to use default
+        :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
+        :param _args: argument dict for SQL rendering
+        :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
+        :return: a boolean of existence find result
+        """
+        delete_query = cls.delete_query().set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        if _where_raw:
+            delete_query.where_raw(_where_raw)
+        if _where_terms:
+            delete_query.where(**_where_terms)
+        return delete_query.go(_args)
 
     @classmethod
     def select(cls, t=None, return_columns=None):
@@ -530,21 +553,22 @@ FROM {{__RIKO_TABLE__}}
             self._args.update(args)
         try:
             raw_result = self._dbi.query(self._sql, self._args)
+            if parse_model:
+                return [self._clz_meta.deserialize(db_conf=self._dbi.get_config(),
+                                                   _datetime_dump=_datetime_dump, **kvt)
+                        for kvt in raw_result]
+            else:
+                if _datetime_dump:
+                    for raw_item in raw_result:
+                        for (k, v) in raw_item.items():
+                            if isinstance(v, dt):
+                                raw_item[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+                            elif isinstance(v, date):
+                                raw_item[k] = v.strftime('%Y-%m-%d')
+                return raw_result
         finally:
-            if self._temporary_dbi:
+            if self._temporary_dbi and not parse_model:
                 self._dbi.close()
-        if parse_model:
-            return [self._clz_meta.deserialize(db_conf=self._dbi.get_config(), _datetime_dump=_datetime_dump, **kvt)
-                    for kvt in raw_result]
-        else:
-            if _datetime_dump:
-                for raw_item in raw_result:
-                    for (k, v) in raw_item.items():
-                        if isinstance(v, dt):
-                            raw_item[k] = v.strftime('%Y-%m-%d %H:%M:%S')
-                        elif isinstance(v, date):
-                            raw_item[k] = v.strftime('%Y-%m-%d')
-            return raw_result
 
     def only(self, parse_model=False, _datetime_dump=True, args=None):
         """
@@ -575,7 +599,7 @@ FROM {{__RIKO_TABLE__}}
                 return self._clz_meta.deserialize(db_conf=self._dbi.get_config(),
                                                   _datetime_dump=_datetime_dump, **ret_raw)
         finally:
-            if self._temporary_dbi:
+            if self._temporary_dbi and not parse_model:
                 self._dbi.close()
 
     def go(self, args=None, return_last_id=False):
@@ -1380,7 +1404,6 @@ class DBI:
         try:
             _conn.ping(reconnect=_reconn)
             cursor = self._conn.cursor()
-            import logging
             logger = logging.getLogger("ORM_QUERY")
             logger.info(sql)
             logger.info(args)
