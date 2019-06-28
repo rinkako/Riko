@@ -85,6 +85,14 @@ class AbstractModel(metaclass=ABCMeta):
             _db_config = self._DB_CONF
         self.db_config_ = Riko.db_config if _db_config is None else _db_config
 
+    @property
+    def dbi(self):
+        """
+        Create a new DB connection using DB config by this ORM.
+        :return: a DBI object, for DB connection operations
+        """
+        return DBI(db_config=self.db_config_)
+
     @classmethod
     def deserialize(cls, db_conf, _datetime_dump=True, **terms):
         """
