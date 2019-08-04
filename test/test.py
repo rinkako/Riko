@@ -43,7 +43,7 @@ if __name__ == '__main__':
     Riko.update_default(database="blog")
 
     # create object
-    article1 = BlogArticle.create(author_uid=12, title="Koito yuu", content="Koito yuu love Nanami Touko.")
+    article1 = BlogArticle.create(author_uid=12, title="Koito yuu", content="Koito yuu loves Nanami Touko.")
     # return auto increment id, the object `aid` will be set to this id automatically since declared at `ak` meta
     article1_id = article1.insert()
     # update object fields
@@ -157,9 +157,9 @@ if __name__ == '__main__':
     # transaction
     article_tx = BlogArticle.create(author_uid=15, title="Transaction test", content="Aha, a transaction.")
     article_tx.insert()
-    with article_tx.db_session_.transaction():
+    with article_tx.db_session_.start_transaction() as _t:
         article_tx.title = "Transaction test (title updated)"
-        article_tx.save()
+        article_tx.save(t=_t)
         # t = 1 / 0  # uncomment this to raise exception, and transaction will rollback
         article_tx.content = "Aha, a transaction. (content updated)"
-        article_tx.save()
+        article_tx.save(t=_t)
