@@ -575,7 +575,7 @@ FROM {{__RIKO_TABLE__}}
                                 raw_item[k] = v.strftime('%Y-%m-%d')
                 return raw_result
         finally:
-            if self._temporary_dbi and not parse_model:
+            if self._temporary_dbi:
                 self._dbi.close()
 
     def only(self, parse_model=False, _datetime_dump=True, args=None):
@@ -607,7 +607,7 @@ FROM {{__RIKO_TABLE__}}
                 return self._clz_meta.deserialize(db_conf=self._dbi.get_config(),
                                                   _datetime_dump=_datetime_dump, **ret_raw)
         finally:
-            if self._temporary_dbi and not parse_model:
+            if self._temporary_dbi:
                 self._dbi.close()
 
     def go(self, args=None, return_last_id=False):
