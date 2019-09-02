@@ -35,7 +35,8 @@ class Riko:
         'user': 'rinka',
         'password': 'rinka',
         'database': 'test',
-        'autocommit': True
+        'autocommit': True,
+        'cursorclass': pymysql.cursors.DictCursor
     }
 
     @staticmethod
@@ -253,7 +254,7 @@ class AbstractModel(metaclass=ABCMeta):
         elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
             duplicate_key_update_term = {}
         re_affect_id = (SingleInsertQuery(self.__class__)
-                        .set_session(model_db_conf=self._DB_CONF, dbi=t)
+                        .set_session(model_db_conf=self.db_config_, dbi=t)
                         .ignore(is_ignore)
                         .replace(is_replace)
                         .on_duplicate_key_update(**duplicate_key_update_term)
@@ -270,7 +271,7 @@ class AbstractModel(metaclass=ABCMeta):
         :return: affected row count
         """
         return (DeleteQuery(self.__class__)
-                .set_session(model_db_conf=self._DB_CONF, dbi=t)
+                .set_session(model_db_conf=self.db_config_, dbi=t)
                 .where(**self.get_pk())
                 .go())
 
@@ -303,22 +304,23 @@ class AbstractModel(metaclass=ABCMeta):
             if k not in ignore_columns:
                 update_field_dict[k] = self.get_value(k)
         return (UpdateQuery(self.__class__)
-                .set_session(model_db_conf=self._DB_CONF, dbi=t)
+                .set_session(model_db_conf=self.db_config_, dbi=t)
                 .set(**update_field_dict)
                 .where(**self.get_pk())
                 .go())
 
     @classmethod
-    def count(cls, t=None, _where_raw=None, _args=None, **_where_terms):
+    def count(cls, t=None, _db_config=None, _where_raw=None, _args=None, **_where_terms):
         """
         Count object satisfied given conditions.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a number of count result
         """
-        cnt_ret = cls.get(t=t, return_columns=("count(1)",), _where_raw=_where_raw,
+        cnt_ret = cls.get(t=t, _db_config=_db_config, return_columns=("count(1)",), _where_raw=_where_raw,
                           _args=_args, _parse_model=False, **_where_terms)
         if len(cnt_ret) > 0:
             return cnt_ret[0]["count(1)"]
@@ -326,28 +328,31 @@ class AbstractModel(metaclass=ABCMeta):
             return 0
 
     @classmethod
-    def has(cls, t=None, _where_raw=None, _args=None, **_where_terms):
+    def has(cls, t=None, _db_config=None, _where_raw=None, _args=None, **_where_terms):
         """
         Find is there any object satisfied given conditions.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a boolean of existence find result
         """
-        return cls.count(t=t, _where_raw=_where_raw, _args=_args, **_where_terms) > 0
+        return cls.count(t=t, _db_config=_db_config, _where_raw=_where_raw, _args=_args, **_where_terms) > 0
 
     @classmethod
-    def delete_many(cls, t=None, _where_raw=None, _args=None, **_where_terms):
+    def delete_many(cls, t=None, _db_config=None, _where_raw=None, _args=None, **_where_terms):
         """
         Delete all records satisfied given conditions.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a boolean of existence find result
         """
-        delete_query = cls.delete_query().set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        delete_query = cls.delete_query().set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                                                      dbi=t)
         if _where_raw:
             delete_query.where_raw(_where_raw)
         if _where_terms:
@@ -355,61 +360,71 @@ class AbstractModel(metaclass=ABCMeta):
         return delete_query.go(_args)
 
     @classmethod
-    def select(cls, t=None, return_columns=None):
+    def select(cls, t=None, _db_config=None, return_columns=None):
         """
         Begin a select query.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         """
-        return SelectQuery(cls, return_columns).set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        return SelectQuery(cls, return_columns).set_session(
+            model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
 
     @classmethod
-    def select_query(cls, t=None, return_columns=None):
+    def select_query(cls, t=None, _db_config=None, return_columns=None):
         """
         Begin a select query.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         """
-        return cls.select(t=t, return_columns=return_columns)
+        return cls.select(t=t, _db_config=_db_config, return_columns=return_columns)
 
     @classmethod
-    def delete_query(cls, t=None):
+    def delete_query(cls, t=None, _db_config=None):
         """
         Begin a delete query.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         """
-        return DeleteQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        return DeleteQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
 
     @classmethod
-    def update_query(cls, t=None):
+    def update_query(cls, t=None, _db_config=None):
         """
         Begin a update query.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         """
-        return UpdateQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        return UpdateQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
 
     @classmethod
-    def insert_query(cls, t=None):
+    def insert_query(cls, t=None, _db_config=None):
         """
         Begin a insert query.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         """
-        return SingleInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        return SingleInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                                                  dbi=t)
 
     @classmethod
-    def insert_many(cls, t=None):
+    def insert_many(cls, t=None, _db_config=None):
         """
         Begin a batch insert query.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         """
-        return BatchInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF, dbi=t)
+        return BatchInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                                                 dbi=t)
 
     @classmethod
-    def get_many(cls, t=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
+    def get_many(cls, t=None, _db_config=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
                  _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions. Alias for `get`.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _limit: limit of query result row number
@@ -422,16 +437,17 @@ class AbstractModel(metaclass=ABCMeta):
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
-        return cls.get(t=t, return_columns=return_columns, _where_raw=_where_raw, _limit=_limit, _offset=_offset,
-                       _order=_order, _args=_args, _parse_model=_parse_model, for_update=for_update,
+        return cls.get(t=t, _db_config=_db_config, return_columns=return_columns, _where_raw=_where_raw, _limit=_limit,
+                       _offset=_offset, _order=_order, _args=_args, _parse_model=_parse_model, for_update=for_update,
                        _datetime_dump=_datetime_dump, **_where_terms)
 
     @classmethod
-    def get(cls, t=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
+    def get(cls, t=None, _db_config=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
             _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _limit: limit of query result row number
@@ -445,18 +461,19 @@ class AbstractModel(metaclass=ABCMeta):
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
         return (SelectQuery(cls, columns=return_columns, limit=_limit, offset=_offset, order_by=_order)
-                .set_session(model_db_conf=cls._DB_CONF, dbi=t)
+                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
                 .for_update(for_update)
                 .get(args=_args, _datetime_dump=_datetime_dump, parse_model=_parse_model))
 
     @classmethod
-    def get_one(cls, t=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
+    def get_one(cls, t=None, _db_config=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
                 for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get one object satisfied given conditions if exists, otherwise return `None`.
         :param t: connection context, None to use default
+        :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
@@ -467,7 +484,7 @@ class AbstractModel(metaclass=ABCMeta):
         :return: a ORM model object, or None if not found
         """
         return (SelectQuery(cls, columns=return_columns)
-                .set_session(model_db_conf=cls._DB_CONF, dbi=t)
+                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
                 .limit(1)
