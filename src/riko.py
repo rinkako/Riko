@@ -6,9 +6,11 @@ DB Engine default to be pymysql, since not thread safe.
 """
 import contextlib
 import logging
+import pymysql
 from abc import ABCMeta, abstractmethod
 from datetime import date, datetime as dt
-import pymysql
+
+from DBUtils.PooledDB import PooledDB
 
 
 class INSERT:
@@ -25,6 +27,38 @@ class JOIN:
     RIGHT_JOIN = 3
 
 
+class ShadedDBPool:
+    """
+    A shaded DB pool based on DBUtil.
+    """
+
+    def __init__(self, driver=pymysql):
+        import threading
+        self._db_driver_clz = driver
+        self._configured_pool = dict()
+        self._sync_mutex = threading.Lock
+
+    def short_connection(self, db_config):
+        return self._db_driver_clz.connect(**db_config)
+
+    def pooled_connection(self, db_config):
+        config_key = tuple(sorted(db_config.items()))
+        if config_key in self._configured_pool:
+            pooled = self._configured_pool[config_key]
+        else:
+            with self._sync_mutex:
+                if config_key not in self._configured_pool:
+                    pooled = PooledDB(self._db_driver_clz,
+                                      maxshared=1,
+                                      maxusage=10000,
+                                      setsession=['SET AUTOCOMMIT = 0'],
+                                      **db_config)
+                    self._configured_pool[config_key] = pooled
+                else:
+                    pooled = self._configured_pool[config_key]
+        return pooled.connection(shareable=False)
+
+
 class Riko:
     """
     Define default database config here
@@ -39,12 +73,16 @@ class Riko:
         'cursorclass': pymysql.cursors.DictCursor
     }
 
+    shaded_pool = ShadedDBPool()
+
     @staticmethod
     def set_default(db_config):
         """
         Set default db config for Riko.
         :param db_config: a dict for pymysql connection
         """
+        if "cursorclass" not in db_config:
+            db_config["cursorclass"] = pymysql.cursors.DictCursor
         Riko.db_config = db_config
 
     @staticmethod
@@ -87,12 +125,13 @@ class AbstractModel(metaclass=ABCMeta):
         self.db_config_ = Riko.db_config if _db_config is None else _db_config
 
     @property
-    def dbi(self):
+    def dbi(self, short_connection=True):
         """
         Create a new DB connection using DB config by this ORM.
+        :param short_connection: is using short connection creation, only available when `t` is None
         :return: a DBI object, for DB connection operations
         """
-        return DBI(db_config=self.db_config_)
+        return DBI(db_config=self.db_config_, short_connection=short_connection)
 
     @classmethod
     def deserialize(cls, db_conf, _datetime_dump=True, **terms):
@@ -226,10 +265,11 @@ class AbstractModel(metaclass=ABCMeta):
                 created.set_value(k, v)
         return created
 
-    def insert(self, t=None, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION, **duplicate_key_update_term):
+    def insert(self, t=None, short_connection=True, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION, **duplicate_key_update_term):
         """
         Insert this object into DB.
         :param t transaction connection object
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param on_duplicate_key_replace: operation when primary key duplicated
         :param duplicate_key_update_term: terms for `ON DUPLICATE KEY UPDATE`
         :return: if `ak` is declared, return inserted auto increment id, otherwise return affected row count
@@ -254,7 +294,7 @@ class AbstractModel(metaclass=ABCMeta):
         elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
             duplicate_key_update_term = {}
         re_affect_id = (SingleInsertQuery(self.__class__)
-                        .set_session(model_db_conf=self.db_config_, dbi=t)
+                        .set_session(model_db_conf=self.db_config_, dbi=t, short_connection=short_connection)
                         .ignore(is_ignore)
                         .replace(is_replace)
                         .on_duplicate_key_update(**duplicate_key_update_term)
@@ -264,31 +304,34 @@ class AbstractModel(metaclass=ABCMeta):
             self.set_ak(re_affect_id)
         return re_affect_id
 
-    def delete(self, t=None):
+    def delete(self, t=None, short_connection=True):
         """
         Delete this object from DB.
         :param t transaction connection object
+        :param short_connection: is using short connection creation, only available when `t` is None
         :return: affected row count
         """
         return (DeleteQuery(self.__class__)
-                .set_session(model_db_conf=self.db_config_, dbi=t)
+                .set_session(model_db_conf=self.db_config_, dbi=t, short_connection=short_connection)
                 .where(**self.get_pk())
                 .go())
 
-    def update(self, ignore_columns=None, t=None):
+    def update(self, ignore_columns=None, t=None, short_connection=True):
         """
         Flush the change of this object to DB. Alias for `save`.
         :param ignore_columns: the columns to be ignore when update, such as `update_time`
         :param t transaction connection object
+        :param short_connection: is using short connection creation, only available when `t` is None
         :return: affected row count
         """
-        return self.save(ignore_columns=ignore_columns, t=t)
+        return self.save(ignore_columns=ignore_columns, t=t, short_connection=short_connection)
 
-    def save(self, ignore_columns=None, t=None):
+    def save(self, ignore_columns=None, t=None, short_connection=True):
         """
         Flush the change of this object to DB.
         :param ignore_columns: the columns to be ignore when update, such as `update_time`
         :param t transaction connection object
+        :param short_connection: is using short connection creation, only available when `t` is None
         :return: affected row count
         """
         update_field_dict = dict()
@@ -304,47 +347,51 @@ class AbstractModel(metaclass=ABCMeta):
             if k not in ignore_columns:
                 update_field_dict[k] = self.get_value(k)
         return (UpdateQuery(self.__class__)
-                .set_session(model_db_conf=self.db_config_, dbi=t)
+                .set_session(model_db_conf=self.db_config_, dbi=t, short_connection=short_connection)
                 .set(**update_field_dict)
                 .where(**self.get_pk())
                 .go())
 
     @classmethod
-    def count(cls, t=None, _db_config=None, _where_raw=None, _args=None, **_where_terms):
+    def count(cls, t=None, short_connection=True, _db_config=None, _where_raw=None, _args=None, **_where_terms):
         """
         Count object satisfied given conditions.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a number of count result
         """
-        cnt_ret = cls.get(t=t, _db_config=_db_config, return_columns=("count(1)",), _where_raw=_where_raw,
-                          _args=_args, _parse_model=False, **_where_terms)
+        cnt_ret = cls.get(t=t, short_connection=short_connection, _db_config=_db_config, return_columns=("count(1)",),
+                          _where_raw=_where_raw, _args=_args, _parse_model=False, **_where_terms)
         if len(cnt_ret) > 0:
             return cnt_ret[0]["count(1)"]
         else:
             return 0
 
     @classmethod
-    def has(cls, t=None, _db_config=None, _where_raw=None, _args=None, **_where_terms):
+    def has(cls, t=None, short_connection=True, _db_config=None, _where_raw=None, _args=None, **_where_terms):
         """
         Find is there any object satisfied given conditions.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: a boolean of existence find result
         """
-        return cls.count(t=t, _db_config=_db_config, _where_raw=_where_raw, _args=_args, **_where_terms) > 0
+        return cls.count(t=t, short_connection=short_connection, _db_config=_db_config, _where_raw=_where_raw,
+                         _args=_args, **_where_terms) > 0
 
     @classmethod
-    def delete_many(cls, t=None, _db_config=None, _where_raw=None, _args=None, **_where_terms):
+    def delete_many(cls, t=None, short_connection=True, _db_config=None, _where_raw=None, _args=None, **_where_terms):
         """
         Delete all records satisfied given conditions.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
         :param _args: argument dict for SQL rendering
@@ -352,7 +399,7 @@ class AbstractModel(metaclass=ABCMeta):
         :return: a boolean of existence find result
         """
         delete_query = cls.delete_query().set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
-                                                      dbi=t)
+                                                      dbi=t, short_connection=short_connection)
         if _where_raw:
             delete_query.where_raw(_where_raw)
         if _where_terms:
@@ -360,70 +407,97 @@ class AbstractModel(metaclass=ABCMeta):
         return delete_query.go(_args)
 
     @classmethod
-    def select(cls, t=None, _db_config=None, return_columns=None):
+    def select(cls, t=None, short_connection=True, _db_config=None, return_columns=None):
         """
         Begin a select query.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         """
         return SelectQuery(cls, return_columns).set_session(
-            model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
+            model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t, short_connection=short_connection)
 
     @classmethod
-    def select_query(cls, t=None, _db_config=None, return_columns=None):
+    def select_query(cls, t=None, short_connection=True, _db_config=None, return_columns=None):
         """
         Begin a select query.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         """
-        return cls.select(t=t, _db_config=_db_config, return_columns=return_columns)
+        return cls.select(t=t, short_connection=short_connection, _db_config=_db_config, return_columns=return_columns)
 
     @classmethod
-    def delete_query(cls, t=None, _db_config=None):
+    def delete_query(cls, t=None, short_connection=True, _db_config=None):
         """
         Begin a delete query.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         """
-        return DeleteQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
+        return DeleteQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                                            dbi=t, short_connection=short_connection)
 
     @classmethod
-    def update_query(cls, t=None, _db_config=None):
+    def update_query(cls, t=None, short_connection=True, _db_config=None):
         """
         Begin a update query.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         """
-        return UpdateQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
+        return UpdateQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                                            dbi=t, short_connection=short_connection)
 
     @classmethod
-    def insert_query(cls, t=None, _db_config=None):
+    def insert_query(cls, t=None, short_connection=True, _db_config=None):
         """
         Begin a insert query.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         """
         return SingleInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
-                                                  dbi=t)
+                                                  dbi=t, short_connection=short_connection)
 
     @classmethod
-    def insert_many(cls, t=None, _db_config=None):
+    def insert_many(cls, t=None, short_connection=True, _db_config=None,
+                    on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION,
+                    **duplicate_key_update_term):
         """
         Begin a batch insert query.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
+        :param on_duplicate_key_replace: operation when primary key duplicated
+        :param duplicate_key_update_term: terms for `ON DUPLICATE KEY UPDATE`
         """
-        return BatchInsertQuery(cls).set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
-                                                 dbi=t)
+        is_replace = False
+        is_ignore = False
+        if on_duplicate_key_replace == INSERT.DUPLICATE_KEY_REPLACE:
+            is_replace = True
+            duplicate_key_update_term = {}
+        elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_IGNORE:
+            is_ignore = True
+            duplicate_key_update_term = {}
+        elif on_duplicate_key_replace == INSERT.DUPLICATE_KEY_EXCEPTION:
+            duplicate_key_update_term = {}
+        return (BatchInsertQuery(cls)
+                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                             dbi=t, short_connection=short_connection)
+                .ignore(is_ignore)
+                .replace(is_replace)
+                .on_duplicate_key_update(**duplicate_key_update_term))
 
     @classmethod
-    def get_many(cls, t=None, _db_config=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
+    def get_many(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
                  _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions. Alias for `get`.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
@@ -437,16 +511,18 @@ class AbstractModel(metaclass=ABCMeta):
         :param _where_terms: where condition terms, only equal condition support only, combined with `AND`
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
-        return cls.get(t=t, _db_config=_db_config, return_columns=return_columns, _where_raw=_where_raw, _limit=_limit,
-                       _offset=_offset, _order=_order, _args=_args, _parse_model=_parse_model, for_update=for_update,
-                       _datetime_dump=_datetime_dump, **_where_terms)
+        return cls.get(t=t, short_connection=short_connection, _db_config=_db_config, return_columns=return_columns,
+                       _where_raw=_where_raw, _limit=_limit, _offset=_offset, _order=_order, _args=_args,
+                       _parse_model=_parse_model, for_update=for_update, _datetime_dump=_datetime_dump, **_where_terms)
 
     @classmethod
-    def get(cls, t=None, _db_config=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
-            _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
+    def get(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None,
+            _limit=None, _offset=None, _order=None, _args=None, _parse_model=True, for_update=False,
+            _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
@@ -461,18 +537,20 @@ class AbstractModel(metaclass=ABCMeta):
         :return: query result in the form of `_parse_model` pattern, default by a list of ORM models
         """
         return (SelectQuery(cls, columns=return_columns, limit=_limit, offset=_offset, order_by=_order)
-                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
+                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                             dbi=t, short_connection=short_connection)
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
                 .for_update(for_update)
                 .get(args=_args, _datetime_dump=_datetime_dump, parse_model=_parse_model))
 
     @classmethod
-    def get_one(cls, t=None, _db_config=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
+    def get_one(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
                 for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get one object satisfied given conditions if exists, otherwise return `None`.
         :param t: connection context, None to use default
+        :param short_connection: is using short connection creation, only available when `t` is None
         :param _db_config: db connection config, None to use default
         :param return_columns: return columns tuple, None to return all fields in mapping table
         :param _where_raw: where condition tuple, each element give a condition and combined with `AND`
@@ -484,7 +562,8 @@ class AbstractModel(metaclass=ABCMeta):
         :return: a ORM model object, or None if not found
         """
         return (SelectQuery(cls, columns=return_columns)
-                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config, dbi=t)
+                .set_session(model_db_conf=cls._DB_CONF if _db_config is None else _db_config,
+                             dbi=t, short_connection=short_connection)
                 .where_raw(*_where_raw if _where_raw else [])
                 .where(**_where_terms)
                 .limit(1)
@@ -550,16 +629,17 @@ FROM {{__RIKO_TABLE__}}
     def __str__(self):
         return self._sql
 
-    def set_session(self, model_db_conf, dbi):
+    def set_session(self, model_db_conf, dbi, short_connection=True):
         """
         Binding db session for ORM operations.
         :param model_db_conf: model _DB_CONF
         :param dbi: DBI object
+        :param short_connection: is using short connection creation, only available when `dbi` is None
         """
         if dbi is None:
             if model_db_conf is None:
                 model_db_conf = Riko.db_config
-            self._dbi = DBI(model_db_conf)
+            self._dbi = DBI(db_config=model_db_conf, short_connection=short_connection)
             self._temporary_dbi = True
         else:
             self._dbi = dbi
@@ -1385,18 +1465,23 @@ class DBI:
     RETURN_AFFECTED_ROW = 4
 
     @staticmethod
-    def get_connection(db_config=None):
+    def get_connection(db_config=None, short_connection=True):
         """
         Get a DBI object by connecting with DB using config.
         :param db_config: DB connection config, None to use default `Riko.db_config`
-        :return: DBI object, represent a connection session, not thread safe since using pymysql
+        :param short_connection: True to create a short connection, False to create a long connection
+        :return: DBI object, represent a connection session
         """
-        return DBI(Riko.db_config if db_config is None else db_config)
+        return DBI(Riko.db_config if db_config is None else db_config, short_connection=short_connection)
 
-    def __init__(self, db_config):
+    def __init__(self, db_config, short_connection=True):
         assert db_config is not None
         self._db_conf = db_config
-        self._conn = pymysql.connect(**db_config)
+        self._is_short_connection = short_connection
+        if self._is_short_connection:
+            self._conn = Riko.shaded_pool.short_connection(db_config)
+        else:
+            self._conn = Riko.shaded_pool.pooled_connection(db_config)
 
     def get_config(self):
         """
@@ -1429,14 +1514,17 @@ class DBI:
         try:
             _conn.ping(reconnect=_reconn)
             cursor = self._conn.cursor()
-            logger = logging.getLogger("ORM_QUERY")
-            logger.info(sql)
-            logger.info(args)
+            # logger = logging.getLogger("ORM_QUERY")
+            # logger.info(sql)
+            # logger.info(args)
             affected = cursor.execute(sql, args)
             if return_pattern == DBI.RETURN_RESULT:
                 fetched = cursor.fetchall()
-                # names = [cd[0] for cd in cursor.description]
-                # ret_val = [dict(zip(names, v)) for v in fetched]
+                if fetched is not None and isinstance(fetched, list) is False:
+                    try:
+                        fetched = list(fetched)
+                    except:
+                        pass
                 ret_val = fetched
             elif return_pattern == DBI.RETURN_CURSOR:
                 ret_val = cursor
