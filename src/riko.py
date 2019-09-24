@@ -36,7 +36,7 @@ class ShadedDBPool:
         import threading
         self._db_driver_clz = driver
         self._configured_pool = dict()
-        self._sync_mutex = threading.Lock
+        self._sync_mutex = threading.Lock()
 
     def short_connection(self, db_config):
         return self._db_driver_clz.connect(**db_config)
@@ -50,6 +50,7 @@ class ShadedDBPool:
                 if config_key not in self._configured_pool:
                     pooled = PooledDB(self._db_driver_clz,
                                       maxshared=1,
+                                      maxcached=500,
                                       maxusage=10000,
                                       setsession=['SET AUTOCOMMIT = 0'],
                                       **db_config)
@@ -265,7 +266,8 @@ class AbstractModel(metaclass=ABCMeta):
                 created.set_value(k, v)
         return created
 
-    def insert(self, t=None, short_connection=True, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION, **duplicate_key_update_term):
+    def insert(self, t=None, short_connection=True, on_duplicate_key_replace=INSERT.DUPLICATE_KEY_EXCEPTION,
+               **duplicate_key_update_term):
         """
         Insert this object into DB.
         :param t transaction connection object
@@ -492,7 +494,8 @@ class AbstractModel(metaclass=ABCMeta):
                 .on_duplicate_key_update(**duplicate_key_update_term))
 
     @classmethod
-    def get_many(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None, _limit=None, _offset=None,
+    def get_many(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None, _limit=None,
+                 _offset=None,
                  _order=None, _args=None, _parse_model=True, for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get objects satisfied given conditions. Alias for `get`.
@@ -545,7 +548,8 @@ class AbstractModel(metaclass=ABCMeta):
                 .get(args=_args, _datetime_dump=_datetime_dump, parse_model=_parse_model))
 
     @classmethod
-    def get_one(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None, _args=None, _parse_model=True,
+    def get_one(cls, t=None, short_connection=True, _db_config=None, return_columns=None, _where_raw=None, _args=None,
+                _parse_model=True,
                 for_update=False, _datetime_dump=True, **_where_terms):
         """
         Get one object satisfied given conditions if exists, otherwise return `None`.
@@ -643,6 +647,7 @@ FROM {{__RIKO_TABLE__}}
             self._temporary_dbi = True
         else:
             self._dbi = dbi
+            self._temporary_dbi = False
         return self
 
     def get(self, args=None, _datetime_dump=True, parse_model=False):
@@ -657,7 +662,7 @@ FROM {{__RIKO_TABLE__}}
         if args is not None:
             self._args.update(args)
         try:
-            raw_result = self._dbi.query(self._sql, self._args)
+            raw_result = self._dbi.query(sql=self._sql, args=self._args, transactional=self._temporary_dbi)
             if parse_model:
                 return [self._clz_meta.deserialize(db_conf=self._dbi.get_config(),
                                                    _datetime_dump=_datetime_dump, **kvt)
@@ -687,7 +692,7 @@ FROM {{__RIKO_TABLE__}}
         if args is not None:
             self._args.update(args)
         try:
-            ret = self._dbi.query(self._sql, self._args)
+            ret = self._dbi.query(sql=self._sql, args=self._args, transactional=self._temporary_dbi)
             ret_raw = ret[0] if ret and len(ret) > 0 else None
             if ret_raw is None:
                 return None
@@ -719,11 +724,11 @@ FROM {{__RIKO_TABLE__}}
             self._args.update(args)
         try:
             if self._is_batch is False:
-                return self._dbi.query(self._sql, self._args,
+                return self._dbi.query(sql=self._sql, args=self._args, transactional=self._temporary_dbi,
                                        return_pattern=DBI.RETURN_AFFECTED_ROW
                                        if return_last_id is False else DBI.RETURN_LAST_ROW_ID)
             else:
-                return self._dbi.insert_many(self._sql, self._args)
+                return self._dbi.insert_many(sql_tpl=self._sql, args=self._args, transactional=self._temporary_dbi)
         finally:
             if self._temporary_dbi:
                 self._dbi.close()
@@ -737,7 +742,8 @@ FROM {{__RIKO_TABLE__}}
         self._prepare_sql()
         if args is not None:
             self._args.update(args)
-        return self._dbi.query(self._sql, self._args, return_pattern=DBI.RETURN_NONE)
+        return self._dbi.query(sql=self._sql, args=self._args,
+                               transactional=self._temporary_dbi, return_pattern=DBI.RETURN_NONE)
 
     @contextlib.contextmanager
     def with_cursor(self, args=None):
@@ -750,7 +756,8 @@ FROM {{__RIKO_TABLE__}}
         if args is not None:
             self._args.update(args)
         try:
-            ptr = self._dbi.query(self._sql, self._args, return_pattern=DBI.RETURN_NONE)
+            ptr = self._dbi.query(sql=self._sql, args=self._args,
+                                  transactional=self._temporary_dbi, return_pattern=DBI.RETURN_NONE)
             yield ptr
         finally:
             if ptr:
@@ -1496,27 +1503,22 @@ class DBI:
         """
         self._conn.close()
 
-    def query(self, sql, args, t=None, return_pattern=RETURN_RESULT):
+    def query(self, sql, args, transactional=True, return_pattern=RETURN_RESULT):
         """
         Perform a raw query.
         :param sql: sql to perform
         :param args: argument dict for sql rendering
-        :param t: connection provider
+        :param transactional: using temporary connection, but not provided transactional connection
         :param return_pattern: result return pattern, default `RETURN_RESULT`
         :return: RETURN_RESULT       - a list of dict objects
                  RETURN_CURSOR       - a cursor for fetching result
                  RETURN_LAST_ROW_ID  - inserted record auto increment id
                  RETURN_AFFECTED_ROW - query affected row count
         """
-        _conn = t or self._conn
-        _reconn = False if t else True
         ret_val = None
         try:
-            _conn.ping(reconnect=_reconn)
+            self._conn.ping(reconnect=transactional)
             cursor = self._conn.cursor()
-            # logger = logging.getLogger("ORM_QUERY")
-            # logger.info(sql)
-            # logger.info(args)
             affected = cursor.execute(sql, args)
             if return_pattern == DBI.RETURN_RESULT:
                 fetched = cursor.fetchall()
@@ -1533,44 +1535,55 @@ class DBI:
             elif return_pattern == DBI.RETURN_AFFECTED_ROW:
                 ret_val = affected
         except Exception as ex:
-            if not t:
-                _conn.rollback()
+            if transactional:
+                self._conn.rollback()
             raise ex
         else:
-            if not t:
-                _conn.commit()
+            if transactional:
+                self._conn.commit()
             return ret_val
 
-    def insert_many(self, sql_tpl, args, t=None):
+    def insert_many(self, sql_tpl, args, transactional=True):
         """
         Perform multiple insert query.
         :param sql_tpl: insert sql template
         :param args: args for insert values in tuple in list
-        :param t: connection provider
+        :param transactional: using temporary connection, but not provided transactional connection
         :return: affected row count
         """
-        _conn = t or self._conn
-        _reconn = False if t else True
         try:
-            _conn.ping(reconnect=_reconn)
+            self._conn.ping(reconnect=transactional)
             cursor = self._conn.cursor()
             ret_val = cursor.executemany(sql_tpl, args)
         except Exception as ex:
-            if not t:
-                _conn.rollback()
+            if transactional:
+                self._conn.rollback()
             raise ex
         else:
-            if not t:
-                _conn.commit()
+            if transactional:
+                self._conn.commit()
             return ret_val
+
+    def rollback(self):
+        """
+        Try to rollback transaction of this DBI connection.
+        """
+        self._conn.rollback()
+
+    def commit(self):
+        """
+        Try to commit transaction of this DBI conneciton.
+        """
+        self._conn.commit()
 
     @contextlib.contextmanager
     def start_transaction(self):
         """
         Create a scoped context with all operations as one transaction.
         """
-        _auto_commit = self._conn.get_autocommit()
-        self._conn.autocommit(False)
+        if self._is_short_connection:
+            _auto_commit = self._conn.get_autocommit()
+            self._conn.autocommit(False)
         self._conn.begin()
         try:
             yield self
@@ -1579,4 +1592,5 @@ class DBI:
             self._conn.rollback()
             raise ex
         finally:
-            self._conn.autocommit(_auto_commit)
+            if self._is_short_connection:
+                self._conn.autocommit(_auto_commit)
